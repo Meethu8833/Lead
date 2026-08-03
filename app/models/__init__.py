@@ -6,6 +6,8 @@ Importing models here registers them on the DeclarativeBase 'Base' class metadat
 """
 
 from app.models.photographer import Photographer
+from app.models.lead import Lead, LeadStatus, LeadSource
+from app.models.lead_activity import LeadActivity, LeadNote, ActivityType
 from app.models.order import Order, OrderStatus, PaymentStatus
 from app.models.product import Product
 from app.models.order_item import OrderItem, ProductionStage
@@ -20,9 +22,24 @@ from app.models.role import Role
 from app.models.permission import Permission, role_permissions
 from app.models.employee import Employee
 from app.models.session import UserSession
+from app.models.whatsapp import (
+    WhatsAppTemplate,
+    WhatsAppCampaign,
+    CampaignRecipient,
+    TemplateCategory,
+    CampaignStatus,
+    MessageStatus,
+)
+from app.models.import_job import ImportJob, ImportJobStatus
 
 __all__ = [
     "Photographer",
+    "Lead",
+    "LeadStatus",
+    "LeadSource",
+    "LeadActivity",
+    "LeadNote",
+    "ActivityType",
     "Order",
     "OrderStatus",
     "PaymentStatus",
@@ -51,6 +68,14 @@ __all__ = [
     "role_permissions",
     "Employee",
     "UserSession",
+    "WhatsAppTemplate",
+    "WhatsAppCampaign",
+    "CampaignRecipient",
+    "TemplateCategory",
+    "CampaignStatus",
+    "MessageStatus",
+    "ImportJob",
+    "ImportJobStatus",
 ]
 
 

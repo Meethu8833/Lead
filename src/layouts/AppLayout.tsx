@@ -9,7 +9,6 @@ import {
   Bell,
   Sun,
   Moon,
-  Laptop,
   ChevronLeft,
   ChevronRight,
   LayoutDashboard,
@@ -69,9 +68,7 @@ export default function AppLayout() {
   ];
 
   const toggleTheme = () => {
-    if (theme === 'light') setTheme('dark');
-    else if (theme === 'dark') setTheme('system');
-    else setTheme('light');
+    setTheme(theme === 'light' ? 'dark' : 'light');
   };
 
   return (
@@ -217,7 +214,6 @@ export default function AppLayout() {
             >
               {theme === 'light' && <Sun className="h-5 w-5" />}
               {theme === 'dark' && <Moon className="h-5 w-5" />}
-              {theme === 'system' && <Laptop className="h-5 w-5" />}
             </button>
 
             {/* Notifications */}

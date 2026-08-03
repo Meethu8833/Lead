@@ -74,6 +74,26 @@ PERMISSIONS = [
     ("photographers", "delete"),
     ("photographers", "view"),
     ("photographers", "*"),
+    # leads
+    ("leads", "create"),
+    ("leads", "update"),
+    ("leads", "delete"),
+    ("leads", "view"),
+    # Bulk collection from external providers. A distinct action from `create` because
+    # importing hundreds of leads from a scrape or a spreadsheet has a very different blast
+    # radius from adding one lead by hand, so a role can hold one without the other.
+    # Note that `leads:*` already covers it via the wildcard matcher.
+    ("leads", "import"),
+    ("leads", "*"),
+    # whatsapp campaigns
+    # Kept separate from `leads:*` on purpose: editing a lead record and blasting a
+    # campaign to thousands of leads are different capabilities with different blast
+    # radii, so a role can be granted one without the other.
+    ("whatsapp", "create"),
+    ("whatsapp", "update"),
+    ("whatsapp", "delete"),
+    ("whatsapp", "view"),
+    ("whatsapp", "*"),
     # wildcards
     ("*", "*"),
     ("*", "view"),
@@ -95,7 +115,7 @@ ROLE_PERMISSIONS_MAPPING = {
             ("orders", "*"), ("payments", "*"), ("inventory", "*"),
             ("dashboard", "view"), ("production", "*"), ("invoices", "*"),
             ("delivery", "*"), ("reports", "view"), ("employees", "*"),
-            ("photographers", "*")
+            ("photographers", "*"), ("leads", "*"), ("whatsapp", "*")
         ]
     },
     "Reception": {
@@ -104,7 +124,9 @@ ROLE_PERMISSIONS_MAPPING = {
         "patterns": [
             ("orders", "create"), ("orders", "view"), ("orders", "update"),
             ("payments", "create"), ("payments", "view"), ("photographers", "*"),
-            ("dashboard", "view")
+            ("leads", "*"), ("dashboard", "view"),
+            # Reception runs outreach day to day but may not delete campaign history.
+            ("whatsapp", "view"), ("whatsapp", "create"), ("whatsapp", "update")
         ]
     },
     "Designer": {

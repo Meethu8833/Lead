@@ -17,7 +17,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-colourlabs_crm}
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
       # Persists SQL data on the host machine across container restarts/destructions
       - postgres_data:/var/lib/postgresql/data
@@ -42,6 +42,7 @@ services:
     environment:
       # Override config variables specifically for docker environment if needed
       POSTGRES_SERVER: db
+      POSTGRES_PORT: 5432
     depends_on:
       db:
         # Ensures web container only starts once the database healthcheck reports healthy
@@ -57,6 +58,26 @@ services:
       timeout: 5s
       retries: 3
 
+  #pgAdmin - Web UI for PostgreSQL database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: colourlabs_pgadmin
+    restart: always
+    environment: 
+      PGADMIN_DEFAULT_EMAIL: admin@colourlabs.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
 # Define named volumes for data persistence
 volumes:
   postgres_data:
+  pgadmin_data:
+
+
+

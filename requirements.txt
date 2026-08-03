@@ -10,8 +10,14 @@ asyncpg==0.30.0
 alembic==1.14.1
 psycopg2-binary==2.9.10
 
+# HTTP client (async) — used by the Google Maps lead provider to call the Places API.
+# Imported lazily inside the provider, so the API still starts if this is absent; the
+# provider then reports a clear run-level error instead of taking the app down.
+httpx==0.28.1
+
 # Utilities
 python-dotenv==1.0.1
 pyjwt==2.10.1
 bcrypt==4.2.0
+python-multipart==0.0.20
 

@@ -170,6 +170,77 @@ async def get_search_service() -> SearchService:
     return SearchService()
 
 
+from app.services.lead import LeadService
+
+async def get_lead_service() -> LeadService:
+    """
+    Dependency provider function that constructs LeadService.
+    """
+    return LeadService()
+
+
+from app.services.lead_activity import LeadActivityService, LeadNoteService
+
+async def get_lead_activity_service() -> LeadActivityService:
+    """
+    Dependency provider function that constructs LeadActivityService.
+    """
+    return LeadActivityService()
+
+
+async def get_lead_note_service() -> LeadNoteService:
+    """
+    Dependency provider function that constructs LeadNoteService.
+    """
+    return LeadNoteService()
+
+
+from app.services.lead_import import LeadImportService
+
+async def get_lead_import_service() -> LeadImportService:
+    """
+    Dependency provider function that constructs LeadImportService.
+
+    The service resolves its collection adapter through
+    `app.services.lead_providers.get_provider`, a registry keyed by the `provider` string on
+    the request. Adding a source is a new module in `app/services/lead_providers/`; neither
+    this dependency nor any endpoint changes.
+    """
+    return LeadImportService()
+
+
+from app.services.whatsapp import (
+    WhatsAppTemplateService,
+    WhatsAppCampaignService,
+    CampaignReplyService,
+)
+
+async def get_whatsapp_template_service() -> WhatsAppTemplateService:
+    """
+    Dependency provider function that constructs WhatsAppTemplateService.
+    """
+    return WhatsAppTemplateService()
+
+
+async def get_whatsapp_campaign_service() -> WhatsAppCampaignService:
+    """
+    Dependency provider function that constructs WhatsAppCampaignService.
+
+    The service resolves its outbound provider adapter through
+    `app.services.whatsapp_provider.get_whatsapp_provider`, which currently returns the
+    no-op provider. Selecting a real adapter later is a change to that factory, not to
+    this dependency or to any endpoint.
+    """
+    return WhatsAppCampaignService()
+
+
+async def get_campaign_reply_service() -> CampaignReplyService:
+    """
+    Dependency provider function that constructs CampaignReplyService.
+    """
+    return CampaignReplyService()
+
+
 import uuid
 from app.models.employee import Employee
 from app.core.exceptions import UnauthorizedException, ForbiddenException

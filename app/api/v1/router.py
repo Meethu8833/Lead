@@ -11,6 +11,9 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     health,
     photographers,
+    leads,
+    lead_activities,
+    lead_imports,
     orders,
     products,
     order_items,
@@ -25,6 +28,7 @@ from app.api.v1.endpoints import (
     search,
     auth,
     employees,
+    whatsapp,
 )
 
 api_router = APIRouter()
@@ -41,6 +45,32 @@ api_router.include_router(
     photographers.router,
     prefix="/photographers",
     tags=["photographers"]
+)
+
+# Registered BEFORE the leads router so that the more specific literal paths
+# `/leads/{id}/notes` and `/leads/{id}/activities` are matched ahead of `/leads/{id}`.
+# Mounted at the root prefix because this router also owns `/lead-notes/{id}`
+# (same pattern as order_items.py's `/orders/{id}/items` + `/order-items/{id}`).
+api_router.include_router(
+    lead_activities.router,
+    prefix="",
+    tags=["lead-activities"]
+)
+
+# Registered BEFORE the leads router for the same reason as lead_activities above: the
+# literal paths `/leads/import`, `/leads/imports` and `/leads/imports/{id}` must be matched
+# ahead of `/leads/{id}`, which would otherwise swallow them and fail on an invalid UUID.
+# Mounted at the root prefix because this router owns the full `/leads/import*` path space.
+api_router.include_router(
+    lead_imports.router,
+    prefix="",
+    tags=["lead-imports"]
+)
+
+api_router.include_router(
+    leads.router,
+    prefix="/leads",
+    tags=["leads"]
 )
 
 api_router.include_router(
@@ -125,6 +155,12 @@ api_router.include_router(
     employees.router,
     prefix="/employees",
     tags=["employees"]
+)
+
+api_router.include_router(
+    whatsapp.router,
+    prefix="/whatsapp",
+    tags=["whatsapp-campaigns"]
 )
 
 

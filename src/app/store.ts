@@ -134,7 +134,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 // THEME STORE
 // ==========================================
 
-export type Theme = 'light' | 'dark' | 'system';
+export type Theme = 'light' | 'dark';
 
 interface ThemeState {
   theme: Theme;
@@ -144,7 +144,7 @@ interface ThemeState {
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set) => ({
-      theme: 'system',
+      theme: 'light',
       setTheme: (theme) => set({ theme }),
     }),
     {

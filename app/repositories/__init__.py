@@ -5,6 +5,8 @@ Exposes all repository classes.
 """
 
 from app.repositories.photographer import PhotographerRepository
+from app.repositories.lead import LeadRepository, AdminLeadRepository
+from app.repositories.lead_activity import LeadActivityRepository, LeadNoteRepository, AdminLeadNoteRepository
 from app.repositories.order import OrderRepository
 from app.repositories.product import ProductRepository
 from app.repositories.order_item import OrderItemRepository
@@ -16,9 +18,21 @@ from app.repositories.inventory import InventoryItemRepository, InventoryTransac
 from app.repositories.attachment import AttachmentRepository
 from app.repositories.employee import EmployeeRepository
 from app.repositories.role import RoleRepository
+from app.repositories.whatsapp import (
+    WhatsAppTemplateRepository,
+    AdminWhatsAppTemplateRepository,
+    WhatsAppCampaignRepository,
+    AdminWhatsAppCampaignRepository,
+    CampaignRecipientRepository,
+)
 
 __all__ = [
     "PhotographerRepository",
+    "LeadRepository",
+    "AdminLeadRepository",
+    "LeadActivityRepository",
+    "LeadNoteRepository",
+    "AdminLeadNoteRepository",
     "OrderRepository",
     "ProductRepository",
     "OrderItemRepository",
@@ -31,5 +45,10 @@ __all__ = [
     "AttachmentRepository",
     "EmployeeRepository",
     "RoleRepository",
+    "WhatsAppTemplateRepository",
+    "AdminWhatsAppTemplateRepository",
+    "WhatsAppCampaignRepository",
+    "AdminWhatsAppCampaignRepository",
+    "CampaignRecipientRepository",
 ]
 

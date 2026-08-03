@@ -15,6 +15,10 @@ import Dashboard from './pages/dashboard/Dashboard';
 import Forbidden from './pages/errors/Forbidden';
 import Unauthorized from './pages/errors/Unauthorized';
 import NotFound from './pages/errors/NotFound';
+import { OrdersPage } from './features/orders/pages/OrdersPage';
+import { OrderDetailsPage } from './features/orders/pages/OrderDetailsPage';
+import { CreateOrderPage } from './features/orders/pages/CreateOrderPage';
+import { EditOrderPage } from './features/orders/pages/EditOrderPage';
 
 export default function App() {
   const { accessToken, authenticated, user, loadProfile, clear, setLoading } = useAuthStore();
@@ -85,18 +89,41 @@ export default function App() {
           }
         />
 
-        {/* Mock/Placeholder routes for future modules protected by respective permissions */}
+        {/* Orders module */}
         <Route
           path="orders"
           element={
             <ProtectedRoute requiredPermission="orders:view">
-              <div className="p-6">
-                <h1 className="text-3xl font-extrabold tracking-tight">Orders Module</h1>
-                <p className="mt-2 text-muted-foreground">Orders list and workflows will go here.</p>
-              </div>
+              <OrdersPage />
             </ProtectedRoute>
           }
         />
+        <Route
+          path="orders/new"
+          element={
+            <ProtectedRoute requiredPermission="orders:create">
+              <CreateOrderPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="orders/:id"
+          element={
+            <ProtectedRoute requiredPermission="orders:view">
+              <OrderDetailsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="orders/:id/edit"
+          element={
+            <ProtectedRoute requiredPermission="orders:update">
+              <EditOrderPage />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Mock/Placeholder routes for future modules protected by respective permissions */}
         <Route
           path="production"
           element={
