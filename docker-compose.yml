@@ -1,0 +1,62 @@
+# ==============================================================================
+# docker-compose.yml
+#
+# Configures the application and database container network for the Photographer CRM.
+# Spins up PostgreSQL database and the FastAPI web service, wiring environment
+# settings, network bridges, volume persistence, and service-readiness healthchecks.
+# ==============================================================================
+
+services:
+  # Database Service (PostgreSQL)
+  db:
+    image: postgres:17-alpine
+    container_name: colourlabs_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-colourlabs_crm}
+    ports:
+      - "5433:5432"
+    volumes:
+      # Persists SQL data on the host machine across container restarts/destructions
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Verifies PostgreSQL is fully ready to accept client connections
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-colourlabs_crm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Web Service
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: colourlabs_api
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override config variables specifically for docker environment if needed
+      POSTGRES_SERVER: db
+    depends_on:
+      db:
+        # Ensures web container only starts once the database healthcheck reports healthy
+        condition: service_healthy
+    volumes:
+      # Optional: Bind-mount local directory to allow live reload during development
+      # Remove or comment out in strict production container environments
+      - .:/app
+    healthcheck:
+      # Calls FastAPI custom /health endpoint to check server availability
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+# Define named volumes for data persistence
+volumes:
+  postgres_data:

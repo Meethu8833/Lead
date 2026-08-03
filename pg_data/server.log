@@ -1,0 +1,77 @@
+2026-08-02 09:29:52.270 IST [4084] LOG:  starting PostgreSQL 16.2, compiled by Visual C++ build 1937, 64-bit
+2026-08-02 09:29:52.275 IST [4084] LOG:  listening on IPv6 address "::1", port 5433
+2026-08-02 09:29:52.275 IST [4084] LOG:  listening on IPv4 address "127.0.0.1", port 5433
+2026-08-02 09:29:52.353 IST [6024] LOG:  database system was interrupted; last known up at 2026-08-02 09:28:50 IST
+2026-08-02 09:29:59.361 IST [6024] LOG:  could not open file "./server.log": sharing violation
+2026-08-02 09:29:59.361 IST [6024] DETAIL:  Continuing to retry for 30 seconds.
+2026-08-02 09:29:59.361 IST [6024] HINT:  You might have antivirus, backup, or similar software interfering with the database system.
+2026-08-02 09:30:26.505 IST [6024] LOG:  syncing data directory (fsync), elapsed time: 34.15 s, current path: .
+2026-08-02 09:30:26.507 IST [6024] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-08-02 09:30:26.519 IST [6024] LOG:  invalid record length at 0/1577ED8: expected at least 24, got 0
+2026-08-02 09:30:26.519 IST [6024] LOG:  redo is not required
+2026-08-02 09:30:26.534 IST [29184] LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-08-02 09:30:26.560 IST [29184] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.006 s, total=0.038 s; sync files=2, longest=0.004 s, average=0.003 s; distance=0 kB, estimate=0 kB; lsn=0/1577ED8, redo lsn=0/1577ED8
+2026-08-02 09:30:26.632 IST [4084] LOG:  database system is ready to accept connections
+2026-08-02 09:52:39.036 IST [17208] LOG:  starting PostgreSQL 16.2, compiled by Visual C++ build 1937, 64-bit
+2026-08-02 09:52:39.044 IST [17208] LOG:  listening on IPv6 address "::1", port 5433
+2026-08-02 09:52:39.045 IST [17208] LOG:  listening on IPv4 address "127.0.0.1", port 5433
+2026-08-02 09:52:39.122 IST [16500] LOG:  database system was interrupted; last known up at 2026-08-02 09:31:06 IST
+2026-08-02 09:52:46.904 IST [16500] LOG:  could not open file "./server.log": sharing violation
+2026-08-02 09:52:46.904 IST [16500] DETAIL:  Continuing to retry for 30 seconds.
+2026-08-02 09:52:46.904 IST [16500] HINT:  You might have antivirus, backup, or similar software interfering with the database system.
+2026-08-02 09:52:53.323 IST [24300] FATAL:  the database system is starting up
+2026-08-02 09:52:56.580 IST [6868] FATAL:  the database system is starting up
+2026-08-02 09:53:01.433 IST [6104] FATAL:  the database system is starting up
+2026-08-02 09:53:13.950 IST [16500] LOG:  syncing data directory (fsync), elapsed time: 34.82 s, current path: .
+2026-08-02 09:53:13.953 IST [16500] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-08-02 09:53:13.960 IST [16500] LOG:  redo starts at 0/1577FC8
+2026-08-02 09:53:14.022 IST [29936] FATAL:  the database system is not yet accepting connections
+2026-08-02 09:53:14.022 IST [29936] DETAIL:  Consistent recovery state has not been yet reached.
+2026-08-02 09:53:14.117 IST [16500] LOG:  invalid record length at 0/19F27C8: expected at least 24, got 0
+2026-08-02 09:53:14.117 IST [16500] LOG:  redo done at 0/19F27A0 system usage: CPU: user: 0.00 s, system: 0.04 s, elapsed: 0.15 s
+2026-08-02 09:53:14.122 IST [26072] LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-08-02 09:53:14.877 IST [26072] LOG:  checkpoint complete: wrote 982 buffers (6.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.105 s, sync=0.631 s, total=0.758 s; sync files=307, longest=0.005 s, average=0.003 s; distance=4586 kB, estimate=4586 kB; lsn=0/19F27C8, redo lsn=0/19F27C8
+2026-08-02 09:53:15.051 IST [17208] LOG:  database system is ready to accept connections
+2026-08-02 09:53:51.982 IST [28008] LOG:  starting PostgreSQL 16.2, compiled by Visual C++ build 1937, 64-bit
+2026-08-02 09:53:51.993 IST [28008] LOG:  listening on IPv6 address "::1", port 5433
+2026-08-02 09:53:51.993 IST [28008] LOG:  listening on IPv4 address "127.0.0.1", port 5433
+2026-08-02 09:53:52.079 IST [24756] LOG:  database system was interrupted; last known up at 2026-08-02 09:53:14 IST
+2026-08-02 09:53:59.668 IST [24756] LOG:  could not open file "./server.log": sharing violation
+2026-08-02 09:53:59.668 IST [24756] DETAIL:  Continuing to retry for 30 seconds.
+2026-08-02 09:53:59.668 IST [24756] HINT:  You might have antivirus, backup, or similar software interfering with the database system.
+2026-08-02 09:54:26.881 IST [24756] LOG:  syncing data directory (fsync), elapsed time: 34.80 s, current path: .
+2026-08-02 09:54:26.884 IST [24756] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-08-02 09:54:26.891 IST [24756] LOG:  redo starts at 0/19F2840
+2026-08-02 09:54:26.891 IST [24756] LOG:  invalid record length at 0/19F2878: expected at least 24, got 0
+2026-08-02 09:54:26.891 IST [24756] LOG:  redo done at 0/19F2840 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+2026-08-02 09:54:26.912 IST [16804] LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-08-02 09:54:26.939 IST [16804] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.003 s, sync=0.006 s, total=0.039 s; sync files=2, longest=0.004 s, average=0.003 s; distance=0 kB, estimate=0 kB; lsn=0/19F2878, redo lsn=0/19F2878
+2026-08-02 09:54:26.984 IST [28008] LOG:  database system is ready to accept connections
+2026-08-02 09:59:48.436 IST [22692] LOG:  starting PostgreSQL 16.2, compiled by Visual C++ build 1937, 64-bit
+2026-08-02 09:59:48.444 IST [22692] LOG:  listening on IPv6 address "::1", port 5433
+2026-08-02 09:59:48.444 IST [22692] LOG:  listening on IPv4 address "127.0.0.1", port 5433
+2026-08-02 09:59:48.538 IST [1248] LOG:  database system was interrupted; last known up at 2026-08-02 09:54:26 IST
+2026-08-02 09:59:56.131 IST [1248] LOG:  could not open file "./server.log": sharing violation
+2026-08-02 09:59:56.131 IST [1248] DETAIL:  Continuing to retry for 30 seconds.
+2026-08-02 09:59:56.131 IST [1248] HINT:  You might have antivirus, backup, or similar software interfering with the database system.
+2026-08-02 10:00:23.237 IST [1248] LOG:  syncing data directory (fsync), elapsed time: 34.69 s, current path: .
+2026-08-02 10:00:23.243 IST [1248] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-08-02 10:00:23.254 IST [1248] LOG:  invalid record length at 0/19F28F0: expected at least 24, got 0
+2026-08-02 10:00:23.254 IST [1248] LOG:  redo is not required
+2026-08-02 10:00:23.268 IST [22768] LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-08-02 10:00:23.302 IST [22768] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.007 s, sync=0.007 s, total=0.043 s; sync files=2, longest=0.004 s, average=0.004 s; distance=0 kB, estimate=0 kB; lsn=0/19F28F0, redo lsn=0/19F28F0
+2026-08-02 10:00:23.374 IST [22692] LOG:  database system is ready to accept connections
+2026-08-02 10:01:32.240 IST [25008] LOG:  starting PostgreSQL 16.2, compiled by Visual C++ build 1937, 64-bit
+2026-08-02 10:01:32.253 IST [25008] LOG:  listening on IPv6 address "::1", port 5433
+2026-08-02 10:01:32.253 IST [25008] LOG:  listening on IPv4 address "127.0.0.1", port 5433
+2026-08-02 10:01:32.323 IST [20692] LOG:  database system was interrupted; last known up at 2026-08-02 10:00:23 IST
+2026-08-02 10:01:39.975 IST [20692] LOG:  could not open file "./server.log": sharing violation
+2026-08-02 10:01:39.975 IST [20692] DETAIL:  Continuing to retry for 30 seconds.
+2026-08-02 10:01:39.975 IST [20692] HINT:  You might have antivirus, backup, or similar software interfering with the database system.
+2026-08-02 10:02:07.021 IST [20692] LOG:  syncing data directory (fsync), elapsed time: 34.69 s, current path: .
+2026-08-02 10:02:07.027 IST [20692] LOG:  database system was not properly shut down; automatic recovery in progress
+2026-08-02 10:02:07.042 IST [20692] LOG:  invalid record length at 0/19F2968: expected at least 24, got 0
+2026-08-02 10:02:07.042 IST [20692] LOG:  redo is not required
+2026-08-02 10:02:07.061 IST [28376] LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-08-02 10:02:07.100 IST [28376] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.007 s, sync=0.009 s, total=0.049 s; sync files=2, longest=0.005 s, average=0.005 s; distance=0 kB, estimate=0 kB; lsn=0/19F2968, redo lsn=0/19F2968
+2026-08-02 10:02:07.186 IST [25008] LOG:  database system is ready to accept connections
