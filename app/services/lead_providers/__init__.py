@@ -37,6 +37,7 @@ from app.services.lead_providers.mock import MockLeadProvider  # noqa: F401
 from app.services.lead_providers.csv_provider import CsvLeadProvider  # noqa: F401
 from app.services.lead_providers.google_maps import GoogleMapsLeadProvider  # noqa: F401
 from app.services.lead_providers.instagram import InstagramLeadProvider  # noqa: F401
+from app.services.lead_providers.overpass import OverpassLeadProvider  # noqa: F401
 from app.services.lead_providers import planned  # noqa: F401
 
 __all__ = [
@@ -59,4 +60,5 @@ __all__ = [
     "CsvLeadProvider",
     "GoogleMapsLeadProvider",
     "InstagramLeadProvider",
+    "OverpassLeadProvider",
 ]

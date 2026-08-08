@@ -94,6 +94,15 @@ PERMISSIONS = [
     ("whatsapp", "delete"),
     ("whatsapp", "view"),
     ("whatsapp", "*"),
+    # follow-up tasks
+    # Kept separate from `leads:*` on purpose: working a follow-up queue (completing your
+    # own tasks) and editing the underlying lead records are different capabilities, so a
+    # junior caller can be granted the first without the second.
+    ("followups", "create"),
+    ("followups", "update"),
+    ("followups", "delete"),
+    ("followups", "view"),
+    ("followups", "*"),
     # wildcards
     ("*", "*"),
     ("*", "view"),
@@ -115,7 +124,8 @@ ROLE_PERMISSIONS_MAPPING = {
             ("orders", "*"), ("payments", "*"), ("inventory", "*"),
             ("dashboard", "view"), ("production", "*"), ("invoices", "*"),
             ("delivery", "*"), ("reports", "view"), ("employees", "*"),
-            ("photographers", "*"), ("leads", "*"), ("whatsapp", "*")
+            ("photographers", "*"), ("leads", "*"), ("whatsapp", "*"),
+            ("followups", "*")
         ]
     },
     "Reception": {
@@ -126,7 +136,11 @@ ROLE_PERMISSIONS_MAPPING = {
             ("payments", "create"), ("payments", "view"), ("photographers", "*"),
             ("leads", "*"), ("dashboard", "view"),
             # Reception runs outreach day to day but may not delete campaign history.
-            ("whatsapp", "view"), ("whatsapp", "create"), ("whatsapp", "update")
+            ("whatsapp", "view"), ("whatsapp", "create"), ("whatsapp", "update"),
+            # Reception works the follow-up queue daily — raising, completing and
+            # rescheduling tasks — but deleting one erases a planned commitment, so that
+            # stays with Manager.
+            ("followups", "view"), ("followups", "create"), ("followups", "update")
         ]
     },
     "Designer": {

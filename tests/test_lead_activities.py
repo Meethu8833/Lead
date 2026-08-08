@@ -196,12 +196,12 @@ async def test_lead_activities_suite():
             # ==========================================================
             print("\n--- [4] TESTING AUTOMATIC 'CONVERTED' ACTIVITY ---")
             lead = await lead_service.update_lead(db, lead_id, LeadUpdate(
-                is_converted=True, status=LeadStatus.CUSTOMER, version=lead.version,
+                is_converted=True, status=LeadStatus.CONVERTED, version=lead.version,
             ))
             items, _ = await activity_service.get_lead_timeline(db, lead_id)
             conv = [a for a in items if a.activity_type == ActivityType.CONVERTED]
             assert len(conv) == 1, f"Expected exactly 1 CONVERTED activity, got {len(conv)}"
-            assert conv[0].activity_metadata["status"] == "CUSTOMER"
+            assert conv[0].activity_metadata["status"] == "CONVERTED"
             print("CONVERTED activity auto-generated on conversion.")
 
             # Re-saving an already-converted lead must NOT append a second CONVERTED entry.

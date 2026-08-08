@@ -23,6 +23,12 @@ from app.core.database import Base
 class LeadStatus(str, enum.Enum):
     """
     Enum representing the CRM lifecycle status of a lead.
+
+    Note on CONVERTED: this member was named CUSTOMER until the Lead Pipeline board was
+    built, and was renamed in-place (migration a1f4c7b93e02) so the terminal-success
+    status reads the same everywhere the pipeline is spoken about. It is unrelated to
+    `app/models/photographer.py`'s own LeadStatus.CUSTOMER, which is a separate enum on a
+    separate Postgres type (`leadstatus` vs this one's `lead_status`) and was left alone.
     """
     NEW = "NEW"
     CONTACTED = "CONTACTED"
@@ -31,7 +37,7 @@ class LeadStatus(str, enum.Enum):
     INTERESTED = "INTERESTED"
     FOLLOW_UP = "FOLLOW_UP"
     NEGOTIATION = "NEGOTIATION"
-    CUSTOMER = "CUSTOMER"
+    CONVERTED = "CONVERTED"
     LOST = "LOST"
 
 
@@ -115,6 +121,17 @@ class Lead(Base):
         String(500),
         nullable=True,
         doc="Facebook profile/page URL (optional)"
+    )
+
+    youtube: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+        doc=(
+            "YouTube channel/page URL (optional). Collected by the contact extractor from "
+            "links published on a business's own website — the platform itself is never "
+            "scraped. Sized like `facebook` because both hold a full URL rather than a "
+            "handle."
+        )
     )
 
     website: Mapped[str | None] = mapped_column(

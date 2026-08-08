@@ -25,6 +25,7 @@ class LeadBase(BaseModel):
     email: str | None = Field(None, description="Contact email address (optional)")
     instagram: str | None = Field(None, description="Instagram username")
     facebook: str | None = Field(None, description="Facebook profile/page URL")
+    youtube: str | None = Field(None, description="YouTube channel/page URL")
     website: str | None = Field(None, description="Website URL")
     address: str | None = Field(None, description="Full street address")
     city: str | None = Field(None, description="City of operation")
@@ -97,7 +98,7 @@ class LeadBase(BaseModel):
             raise ValueError("Invalid email format.")
         return v
 
-    @field_validator("website", "facebook")
+    @field_validator("website", "facebook", "youtube")
     @classmethod
     def validate_urls(cls, v: str | None) -> str | None:
         """
@@ -151,6 +152,7 @@ class LeadUpdate(BaseModel):
     email: str | None = Field(None)
     instagram: str | None = Field(None)
     facebook: str | None = Field(None)
+    youtube: str | None = Field(None)
     website: str | None = Field(None)
     address: str | None = Field(None)
     city: str | None = Field(None)
@@ -217,7 +219,7 @@ class LeadUpdate(BaseModel):
             raise ValueError("Invalid email format.")
         return v
 
-    @field_validator("website", "facebook")
+    @field_validator("website", "facebook", "youtube")
     @classmethod
     def validate_urls_if_provided(cls, v: str | None) -> str | None:
         if v is None:
@@ -251,6 +253,13 @@ class LeadResponse(LeadBase):
     """
     id: uuid.UUID
     is_converted: bool
+    # Exposed read-only. The column is maintained by the WhatsApp campaign module (on
+    # dispatch and on reply), never set by a client, which is why it appears here rather
+    # than on LeadBase/LeadCreate/LeadUpdate. The Lead Details profile reads it directly
+    # instead of re-deriving "last contacted" from the activity timeline.
+    last_contacted_at: datetime | None = Field(
+        None, description="Timestamp of the most recent outbound or inbound contact with this lead"
+    )
     version: int
     created_at: datetime
     updated_at: datetime

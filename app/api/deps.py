@@ -209,10 +209,47 @@ async def get_lead_import_service() -> LeadImportService:
     return LeadImportService()
 
 
+from app.services.lead_discovery import LeadDiscoveryService
+
+async def get_lead_discovery_service() -> LeadDiscoveryService:
+    """
+    Dependency provider function that constructs LeadDiscoveryService.
+
+    Constructed with no arguments, which gives the shipped pipeline: the Overpass provider,
+    real website discovery, real contact extraction, real normalization and deduplication.
+    Every collaborator is a constructor argument on the service, so a test overrides this
+    dependency with an instance holding stubs for the three network-touching stages rather
+    than monkey-patching anything global.
+
+    A new instance per request is cheap — the service holds no run state — but note the two
+    stage services that *do* hold rate limiters (Overpass, the extractor's per-host
+    semaphore) are therefore per-request too. That is acceptable while discovery is an
+    operator-triggered action rather than a scheduled fan-out; if it becomes the latter,
+    this should hand out one shared instance so concurrent runs queue against the public
+    endpoints instead of bursting.
+    """
+    return LeadDiscoveryService()
+
+
+from app.services.lead_deduplication import LeadDeduplicationService
+
+async def get_lead_deduplication_service() -> LeadDeduplicationService:
+    """
+    Dependency provider function that constructs LeadDeduplicationService.
+
+    Constructed with the default `LeadRepository`, so soft-deleted leads are excluded from
+    matching: a lead an operator deleted must not silently absorb a freshly collected
+    record. The service's thresholds are left at their module defaults here; a caller
+    working a noisier source can construct its own instance with looser ones.
+    """
+    return LeadDeduplicationService()
+
+
 from app.services.whatsapp import (
     WhatsAppTemplateService,
     WhatsAppCampaignService,
     CampaignReplyService,
+    MetaWebhookService,
 )
 
 async def get_whatsapp_template_service() -> WhatsAppTemplateService:
@@ -239,6 +276,38 @@ async def get_campaign_reply_service() -> CampaignReplyService:
     Dependency provider function that constructs CampaignReplyService.
     """
     return CampaignReplyService()
+
+
+async def get_meta_webhook_service() -> MetaWebhookService:
+    """
+    Dependency provider function that constructs MetaWebhookService.
+
+    The Meta webhook endpoint constructs this itself rather than depending on this provider,
+    because that route must remain reachable without the auth dependency chain. Exposed here
+    for consistency and for direct testing.
+    """
+    return MetaWebhookService()
+
+
+from app.services.follow_up import FollowUpTaskService, FollowUpAutomationService
+
+async def get_follow_up_task_service() -> FollowUpTaskService:
+    """
+    Dependency provider function that constructs FollowUpTaskService.
+    """
+    return FollowUpTaskService()
+
+
+async def get_follow_up_automation_service() -> FollowUpAutomationService:
+    """
+    Dependency provider function that constructs FollowUpAutomationService.
+
+    Provided for completeness and for direct testing. No endpoint depends on it: automation
+    is triggered by domain events inside LeadService and CampaignReplyService, which
+    construct it themselves so a task is always created in the same transaction as the event
+    that caused it.
+    """
+    return FollowUpAutomationService()
 
 
 import uuid

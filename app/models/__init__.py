@@ -31,6 +31,14 @@ from app.models.whatsapp import (
     MessageStatus,
 )
 from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.follow_up import (
+    FollowUpTask,
+    FollowUpType,
+    FollowUpPriority,
+    FollowUpStatus,
+    OPEN_FOLLOW_UP_STATUSES,
+    CLOSED_FOLLOW_UP_STATUSES,
+)
 
 __all__ = [
     "Photographer",
@@ -76,6 +84,12 @@ __all__ = [
     "MessageStatus",
     "ImportJob",
     "ImportJobStatus",
+    "FollowUpTask",
+    "FollowUpType",
+    "FollowUpPriority",
+    "FollowUpStatus",
+    "OPEN_FOLLOW_UP_STATUSES",
+    "CLOSED_FOLLOW_UP_STATUSES",
 ]
 
 

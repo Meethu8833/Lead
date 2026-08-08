@@ -53,9 +53,16 @@ class LeadService:
         self,
         repository: LeadRepository | None = None,
         activity_service: LeadActivityService | None = None,
+        follow_up_automation=None,
     ) -> None:
         self.repository = repository or LeadRepository()
         self.activity_service = activity_service or LeadActivityService()
+        # Imported lazily inside __init__ rather than at module scope: the follow-up module
+        # imports LeadRepository and would close an import cycle if imported at the top.
+        if follow_up_automation is None:
+            from app.services.follow_up import FollowUpAutomationService
+            follow_up_automation = FollowUpAutomationService()
+        self.follow_up_automation = follow_up_automation
 
     async def create_lead(self, db: AsyncSession, schema: LeadCreate) -> Lead:
         """
@@ -195,13 +202,24 @@ class LeadService:
 
         # "Converted" fires on the transition, not the state, so re-saving an already
         # converted lead does not append a duplicate CONVERTED entry. Either the explicit
-        # is_converted flag flipping to True, or status arriving at CUSTOMER, counts.
+        # is_converted flag flipping to True, or status arriving at CONVERTED, counts.
         became_converted = (
             (not was_converted and lead.is_converted)
-            or (old_status != LeadStatus.CUSTOMER and lead.status == LeadStatus.CUSTOMER)
+            or (old_status != LeadStatus.CONVERTED and lead.status == LeadStatus.CONVERTED)
         )
         if became_converted:
             await self.activity_service.log_converted(db, lead)
+
+        # Follow-up automation: entering NEGOTIATION raises a meeting task. Fired on the
+        # transition only (the automation compares old and new), so re-saving a lead that is
+        # already in negotiation does not stack up duplicate meetings. Committed here rather
+        # than deferred, because the repository already committed the lead update above —
+        # passing commit=False would leave the task unflushed on this path. The automation
+        # cannot raise; a failure is logged and the lead update stands.
+        if "status" in changes:
+            await self.follow_up_automation.on_lead_status_changed(
+                db, lead=lead, old_status=old_status, new_status=lead.status, commit=True
+            )
 
         return lead
 

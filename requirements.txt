@@ -15,6 +15,19 @@ psycopg2-binary==2.9.10
 # provider then reports a clear run-level error instead of taking the app down.
 httpx==0.28.1
 
+# HTML parsing — used by `ContactExtractorService` to read a lead's website and extract the
+# contact details published in its header, footer, contact page and about page. Imported
+# lazily inside the service, so the API still starts if this is absent; extraction then
+# reports a clear error instead of taking the app down.
+beautifulsoup4==4.12.3
+
+# Phone-number parsing and validation for contact extraction (libphonenumber port). Turns the
+# many ways an Indian site writes a number — "9876543210", "+91 98765 43210", "0091 ...",
+# "080 12345678" — into one E.164 value, and knows which digit ranges are actually assignable
+# so order numbers and GST identifiers are not stored as phones. Imported lazily like the
+# parser above: without it, extraction falls back to heuristic validation rather than failing.
+phonenumbers==9.0.36
+
 # Utilities
 python-dotenv==1.0.1
 pyjwt==2.10.1

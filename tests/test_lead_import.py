@@ -200,11 +200,11 @@ async def test_lead_import_suite() -> None:
             # 1.1 Every shipped provider satisfies the interface.
             keys = registered_provider_keys()
             for expected in (
-                "mock", "csv", "google_maps", "justdial", "facebook",
+                "mock", "csv", "google_maps", "overpass", "justdial", "facebook",
                 "instagram", "indiamart", "wedding_directory",
             ):
                 check(expected in keys, f"Provider '{expected}' is not registered.")
-            print(f"All 8 providers are registered: {', '.join(keys)}")
+            print(f"All 9 providers are registered: {', '.join(keys)}")
 
             for key in keys:
                 provider = get_provider(key)

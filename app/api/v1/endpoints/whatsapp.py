@@ -14,20 +14,28 @@ Every route is protected by the existing `RequirePermission` dependency using a 
 a receptionist who may correct a phone number should not thereby be able to blast 5,000
 leads — so unlike lead notes, this module does NOT reuse `leads:*`.
 
-The reply webhook is the one endpoint that a third party (not a logged-in employee) will
-eventually call. It is protected by `whatsapp:update` for now, which means it is reachable
-only by an authenticated operator or an internal integration holding a token. A real
-provider integration cannot present a JWT and will instead need signature verification
-(Meta's `X-Hub-Signature-256`, Twilio's `X-Twilio-Signature`); that verification is
-provider-specific and belongs with the provider adapter, so it is deliberately deferred
-along with the adapter itself rather than guessed at now. Leaving the endpoint behind RBAC
-in the meantime is the safe default: an unauthenticated webhook with no signature check
-would let anyone on the internet rewrite lead statuses.
+Two families of webhook endpoint therefore exist, and the difference is deliberate:
+
+- `/webhook/reply` and `/webhook/status` are the **internal, provider-neutral** routes. They
+  take our own flat schemas, and they stay behind `whatsapp:update` so an operator or an
+  internal integration can replay or correct an event by hand.
+- `/webhook/meta` is the **Meta Cloud API** route. Meta cannot present a JWT, so this one is
+  deliberately NOT behind `RequirePermission`; it is authenticated instead by Meta's own
+  mechanisms, which the adapter implements: a `hub.verify_token` match on the GET
+  subscription handshake, and an `X-Hub-Signature-256` HMAC over the raw body on every POST.
+  An unsigned or wrongly-signed POST is rejected with 403 before it reaches any service.
+
+The Meta route reads `await request.body()` and parses the JSON itself rather than
+declaring a Pydantic body model. That is required, not stylistic: the HMAC covers the exact
+bytes Meta sent, and letting FastAPI parse then re-serialise the body produces different
+bytes whose signature would never match.
 """
 
+import json
+import logging
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -62,9 +70,11 @@ from app.services.whatsapp import (
     WhatsAppTemplateService,
     WhatsAppCampaignService,
     CampaignReplyService,
+    MetaWebhookService,
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
@@ -542,3 +552,169 @@ async def record_delivery_status(
         error_message=schema.error_message,
         occurred_at=schema.occurred_at,
     )
+
+
+# =====================================================================
+# META CLOUD API WEBHOOK
+# =====================================================================
+#
+# These two routes are the only unauthenticated endpoints in the module, because Meta
+# cannot present a JWT. They are authenticated by Meta's own mechanisms instead — a
+# verify-token match on GET, an HMAC signature on POST — both implemented in
+# `MetaWebhookVerifier`. See the module docstring.
+
+@router.get(
+    "/webhook/meta",
+    status_code=status.HTTP_200_OK,
+    summary="Verify the Meta webhook subscription (Meta calls this)",
+    description=(
+        "Meta's subscription handshake. Called once by Meta when an operator subscribes this URL "
+        "in the app dashboard. Echoes `hub.challenge` back as plain text only when `hub.verify_token` "
+        "matches WHATSAPP_VERIFY_TOKEN; otherwise returns 403. Deliberately not behind JWT/RBAC — "
+        "Meta cannot authenticate, and the shared verify token is the check."
+    ),
+    response_class=Response,
+)
+async def verify_meta_webhook(
+    hub_mode: str | None = Query(None, alias="hub.mode"),
+    hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(None, alias="hub.challenge"),
+) -> Response:
+    """
+    GET /whatsapp/webhook/meta Endpoint Flow:
+    Verify hub.mode + hub.verify_token -> echo hub.challenge as text/plain, or 403.
+
+    The challenge is returned as **plain text, unquoted**. Meta compares the raw response
+    body against the challenge it sent, so returning JSON (`"1158201444"` with quotes) fails
+    the handshake — which is why this route sets its own `Response` instead of letting
+    FastAPI serialise the return value.
+    """
+    from app.services.whatsapp_cloud import MetaWebhookVerifier
+
+    challenge = MetaWebhookVerifier().verify_challenge(
+        hub_mode, hub_verify_token, hub_challenge
+    )
+    if challenge is None:
+        return Response(status_code=status.HTTP_403_FORBIDDEN, content="Verification failed")
+    return Response(status_code=status.HTTP_200_OK, content=challenge, media_type="text/plain")
+
+
+@router.post(
+    "/webhook/meta",
+    status_code=status.HTTP_200_OK,
+    # The handler returns either a plain dict (accepted) or a raw 403 Response (bad
+    # signature), so response-model generation is switched off rather than forcing the
+    # rejection path through a schema it does not fit.
+    response_model=None,
+    summary="Receive Meta Cloud API events (Meta calls this)",
+    description=(
+        "Receives delivery-status updates and inbound replies from the WhatsApp Cloud API. "
+        "Every request must carry a valid `X-Hub-Signature-256` HMAC of the raw body keyed by "
+        "WHATSAPP_APP_SECRET; unsigned or mis-signed requests are rejected with 403 before any "
+        "processing. Valid payloads are translated into the existing pipeline: status events go "
+        "through the same monotonic `apply_delivery_status` path as the internal webhook, and "
+        "replies through the same `record_reply` path (timeline entry, last_contacted_at, "
+        "lead-status automation, follow-up task). Always returns 200 for a signed payload, "
+        "including one whose events match no recipient, so Meta does not retry it forever."
+    ),
+)
+async def receive_meta_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response | dict:
+    """
+    POST /whatsapp/webhook/meta Endpoint Flow:
+    Raw body -> HMAC signature check (403 on failure) -> parse Meta JSON -> route each event
+    into the existing campaign/reply services -> 200 with a summary of what was applied.
+
+    The body is read as raw bytes and parsed here rather than declared as a Pydantic model,
+    because the signature covers the exact bytes Meta sent — see the module docstring.
+    """
+    from app.services.whatsapp_cloud import MetaWebhookParser, MetaWebhookVerifier
+
+    raw_body = await request.body()
+
+    verifier = MetaWebhookVerifier()
+    if not verifier.verify_signature(raw_body, request.headers.get("X-Hub-Signature-256")):
+        # 403 rather than 401: the caller is not being asked to authenticate differently,
+        # it is being told the request is not trusted. Returning a non-2xx here is also what
+        # makes Meta surface the misconfiguration in its dashboard instead of silently
+        # dropping events.
+        return Response(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content='{"success":false,"error_code":"INVALID_SIGNATURE",'
+                    '"detail":"Webhook signature verification failed."}',
+            media_type="application/json",
+        )
+
+    try:
+        payload = json.loads(raw_body or b"{}")
+    except json.JSONDecodeError:
+        # A signed but unparseable body is Meta's problem, not ours, and retrying it will
+        # produce the same result — so acknowledge it rather than inviting endless retries.
+        logger.warning("Received a signed Meta webhook with an unparseable JSON body.")
+        return {"success": True, "detail": "Payload was not valid JSON; ignored.", "summary": None}
+
+    parsed = MetaWebhookParser().parse(payload)
+
+    if parsed.ignored:
+        logger.info("Meta webhook: ignored %d entrie(s): %s", len(parsed.ignored), parsed.ignored)
+
+    if parsed.is_empty:
+        # A payload with nothing actionable is normal — Meta sends account-level events
+        # (template approvals, quality-rating changes) to the same subscription.
+        return {
+            "success": True,
+            "detail": "No actionable delivery statuses or replies in this payload.",
+            "summary": {"ignored": parsed.ignored},
+        }
+
+    summary = await MetaWebhookService().process(
+        db=db, statuses=parsed.statuses, replies=parsed.replies
+    )
+    summary["ignored"] = parsed.ignored
+    return {"success": True, "detail": "Webhook processed.", "summary": summary}
+
+
+# =====================================================================
+# PROVIDER STATUS
+# =====================================================================
+
+@router.get(
+    "/provider/status",
+    status_code=status.HTTP_200_OK,
+    summary="Report the configured provider's readiness",
+    description=(
+        "Reports which outbound provider adapter is active and whether its credentials are complete. "
+        "The configuration check is offline and instant; pass `check_health=true` to additionally "
+        "make one authenticated call to the provider to confirm it is reachable. Lets an operator "
+        "find a missing credential before launching a campaign rather than from 5,000 failed rows."
+    ),
+    dependencies=[Depends(RequirePermission("whatsapp:view"))],
+)
+async def get_provider_status(
+    check_health: bool = Query(
+        False, description="Also make one live call to the provider to confirm reachability"
+    ),
+) -> dict:
+    """
+    GET /whatsapp/provider/status Endpoint Flow:
+    Resolve the configured adapter -> validate_configuration() -> optional health_check().
+
+    Never returns the credentials themselves, only which ones are missing by variable name.
+    """
+    from app.services.whatsapp_provider import get_whatsapp_provider
+
+    provider = get_whatsapp_provider()
+    config = await provider.validate_configuration()
+
+    body: dict = {
+        "provider": provider.name,
+        "configured": config.valid,
+        "missing": config.missing,
+        "warnings": config.warnings,
+        "detail": config.as_message(),
+    }
+    if check_health:
+        body["healthy"] = await provider.health_check()
+    return body

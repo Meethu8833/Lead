@@ -762,7 +762,7 @@ async def test_whatsapp_suite():
             # a converted lead must never be re-categorised by an inbound message
             converted_lead = await db.get(Lead, need_details_recip.lead_id)
             await db.refresh(converted_lead)
-            converted_lead.status = LeadStatus.CUSTOMER
+            converted_lead.status = LeadStatus.CONVERTED
             converted_lead.is_converted = True
             db.add(converted_lead)
             await db.commit()
@@ -772,10 +772,10 @@ async def test_whatsapp_suite():
                 provider_message_id=need_details_recip.provider_message_id,
                 reply_type="not_interested",
             )
-            assert reply_result["lead_status"] == LeadStatus.CUSTOMER, \
-                "A reply demoted a converted CUSTOMER lead"
+            assert reply_result["lead_status"] == LeadStatus.CONVERTED, \
+                "A reply demoted a converted CONVERTED lead"
             assert reply_result["lead_status_changed"] is False
-            print("A converted (CUSTOMER) lead is never re-categorised by a reply.")
+            print("A converted (CONVERTED) lead is never re-categorised by a reply.")
 
             # unmatched reply raises
             try:

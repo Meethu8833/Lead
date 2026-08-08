@@ -43,6 +43,16 @@ class ActivityType(str, enum.Enum):
     WHATSAPP_REPLIED = "WHATSAPP_REPLIED"
     PHONE_CALL = "PHONE_CALL"
     FOLLOW_UP = "FOLLOW_UP"
+    # Follow-up & Task Management lifecycle. FOLLOW_UP above is retained as the generic
+    # "a follow-up happened" marker; the four members below are the specific, filterable
+    # task events emitted by FollowUpTaskService. They are distinct types rather than one
+    # FOLLOW_UP type with a metadata discriminator because "show me every task completed
+    # this week" must be an indexed query on activity_type, not a JSONB scan.
+    TASK_CREATED = "TASK_CREATED"
+    TASK_COMPLETED = "TASK_COMPLETED"
+    TASK_RESCHEDULED = "TASK_RESCHEDULED"
+    TASK_CANCELLED = "TASK_CANCELLED"
+    MEETING_SCHEDULED = "MEETING_SCHEDULED"
     NOTE = "NOTE"
     STATUS_CHANGED = "STATUS_CHANGED"
     CONVERTED = "CONVERTED"

@@ -825,3 +825,1696 @@ identical here, and none of the three touches the collection path.
 7. **Long-lived tokens expire after 60 days.** Expiry is detected and reported with an
    actionable message (the run fails with "set a fresh INSTAGRAM_ACCESS_TOKEN") but there is no
    automatic refresh and no proactive expiry warning. A token refresh job is the real fix.
+
+---
+
+## Follow-up & Task Management Module
+
+**Status:** Complete
+
+**Scope:** A follow-up engine that tells employees which leads need action today — task CRUD,
+assignment, completion, rescheduling, cancellation, the today/upcoming/overdue worklists,
+statistics, and automatic task creation from campaign replies and lead status changes. Every
+follow-up action emits a `LeadActivity`.
+
+Explicitly out of scope, by instruction: **notifications** and **background schedulers**
+(both deferred to a later phase — see the gaps below, and `walkthrough.md` §5 for how the
+absence of a scheduler shaped the overdue query rather than being stubbed). ERP modules,
+Orders, Inventory, Production, Billing and Authentication were not modified.
+
+### Checklist
+
+- [x] `app/models/follow_up.py` — `FollowUpTask` with all specified fields, plus
+      `FollowUpType` (Call/WhatsApp/Meeting/Reminder/Email), `FollowUpPriority`
+      (Low/Medium/High/Urgent) and `FollowUpStatus` (Pending/Completed/Cancelled/Overdue).
+      Soft delete, optimistic locking, three composite indexes matching the hot queries.
+- [x] `app/models/lead_activity.py` — +5 `ActivityType` members (`TASK_CREATED`,
+      `TASK_COMPLETED`, `TASK_RESCHEDULED`, `TASK_CANCELLED`, `MEETING_SCHEDULED`).
+- [x] `app/repositories/follow_up.py` — CRUD, `get_due_between`, `get_overdue`,
+      `find_open_duplicate`, aggregate helpers, + `AdminFollowUpTaskRepository`.
+- [x] `app/services/follow_up.py` — `FollowUpTaskService` (CRUD, assign, complete,
+      reschedule, cancel, today/upcoming/overdue, statistics) and
+      `FollowUpAutomationService` (the four triggers).
+- [x] `app/schemas/follow_up.py` — create/update/complete/reschedule/assign/cancel/response/
+      list/statistics DTOs, with naive-datetime normalization at the boundary.
+- [x] `app/api/v1/endpoints/followups.py` — all 9 specified routes, plus 4 lifecycle routes
+      (`/assign`, `/complete`, `/reschedule`, `/cancel`). Literal paths declared before `/{id}`.
+- [x] Automation wired: `whatsapp.py::record_reply` (reply triggers + the NEGOTIATION
+      transition it causes) and `lead.py::update_lead` (manual NEGOTIATION transition).
+- [x] Every lifecycle transition emits a `LeadActivity` in the same transaction.
+- [x] RBAC — `followups:{view,create,update,delete,*}` seeded; granted `*` to Manager and
+      view/create/update to Reception.
+- [x] `alembic/versions/9dcc5194e0bb_add_follow_up_task_management.py` — `follow_up_tasks`
+      table + hand-added `ALTER TYPE lead_activity_type ADD VALUE` statements (autogenerate
+      does not diff enum members) + enum cleanup on downgrade. Applied successfully.
+- [x] `tests/test_followups.py` — 15-section integration suite, all passing.
+- [x] Full regression sweep — 13/13 pre-existing suites pass; the 3 ERP suites fail on the
+      documented pre-existing `Photographer` fixture only.
+
+### Notable finding
+
+The automation contract ("a follow-up failure must never cost us the triggering event") was
+**not** satisfied by the obvious `try/except Exception`. A DB-level error poisons the
+SQLAlchemy session, so the caller's own later `commit()` still failed with
+`PendingRollbackError` — the swallow defeated itself and the reply was lost anyway. Fixed by
+running the automation write inside a SAVEPOINT (`db.begin_nested()`), and the test now
+asserts both halves: the call returns `None` **and** the caller can still commit real work.
+A bare try/except passes the first and fails the second. Full detail in `walkthrough.md` §8.
+
+### Known gaps / follow-ups for a later phase
+
+1. **No background scheduler, so nothing writes the stored `OVERDUE` status.** By
+   instruction. The overdue query is deliberately written to derive overdue-ness
+   (`status == PENDING AND scheduled_at < now`) OR-ed with the stored value, so the worklist
+   is correct today and the sweeper — when it lands — only has to flip the stored value with
+   **no query changes**. The one live consequence: a row's stored `status` may read `PENDING`
+   while it is in fact overdue, so anything reading `status` directly (a future report, an
+   export) must use the same rule rather than trusting the column.
+
+2. **No notifications.** By instruction. The service emits log lines and `LeadActivity` rows
+   at every transition, which is the natural place a notification dispatch would hook in; no
+   interface change is needed to add it.
+
+3. **Day boundaries are computed in UTC.** "Today" rolls over at 05:30 for an IST team. This
+   is the most user-visible limitation in the module. The fix is a configured business
+   timezone in `app/core/config.py` threaded through `day_bounds()` — deliberately not
+   hardcoded to a `+05:30` offset, which would break the moment the business has a second
+   location. **Recommended as the first thing to add next.**
+
+4. **The `days` window for "upcoming" is a query parameter with a 7-day default, not a
+   per-user preference.** Fine for now; a saved per-employee default belongs with a wider
+   user-preferences feature rather than being special-cased here.
+
+5. **Automated task delays (2h/4h/24h/1h) are hardcoded in `AUTOMATION_RULES`.** They are
+   expressed as data in one dictionary rather than scattered through branching, so making
+   them DB-configurable is a contained change — but it is a change. Worth doing once a
+   manager asks to tune them without a deploy.
+
+6. **No recurring or dependent tasks.** Every task is a single independent item; there is no
+   "call again every week until they answer" and no "task B unblocks when task A completes".
+   Neither was specified, and both would need a genuine scheduler (gap 1) to be useful.
+
+7. **Statistics are computed live on every request.** Seven `COUNT` queries plus three
+   `GROUP BY` queries per call, all indexed and fast at current data volumes. If the
+   statistics endpoint becomes a dashboard polling target, it wants caching or a materialized
+   rollup — not a rewrite, but worth watching.
+
+8. **No bulk operations.** Completing or reassigning twenty tasks is twenty API calls. A
+   `PUT /followups/bulk` would be a straightforward addition to the existing service methods
+   once the frontend needs it.
+
+---
+
+## WhatsApp Cloud API Provider
+
+**Status:** Complete
+
+**Scope:** Replace the NoOp WhatsApp provider with a production-ready Meta WhatsApp Cloud API
+implementation behind the existing `WhatsAppProvider` port — message sending, template
+sending, status mapping, webhook verification, reply handling and error handling for every
+failure mode named in the specification.
+
+Strictly limited to the provider and its inbound webhook. Lead Management, the Follow-up
+engine, ERP modules, Orders, Inventory, Authentication and RBAC were **not** modified. The
+campaign services were not modified except for one additive webhook-routing class — no
+campaign business logic moved into the provider, and `start_campaign`,
+`apply_delivery_status` and `record_reply` are unchanged.
+
+### Checklist
+
+- [x] `app/core/config.py` — **+14 settings**: `WHATSAPP_ACCESS_TOKEN`,
+      `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_BUSINESS_ACCOUNT_ID`, `WHATSAPP_VERIFY_TOKEN`,
+      `WHATSAPP_APP_SECRET`, `GRAPH_API_VERSION`, plus provider selection, retry budget,
+      timeout, default country code, template toggle and signature-requirement flag. No
+      credential hardcoded anywhere.
+- [x] `.env` — the same block, all credentials left empty so the provider stays disabled and
+      `WHATSAPP_PROVIDER=noop` keeps sends simulated until an operator opts in.
+- [x] `app/services/whatsapp_provider.py` — port extended with `send_template()`,
+      `get_message_status()` and `validate_configuration()` as **concrete** methods with
+      working defaults (so no existing adapter breaks), plus `ProviderConfigurationResult` /
+      `ProviderMessageStatus` DTOs, `retryable`/`error_code` on `ProviderSendResult`, and a
+      settings-driven factory that lazily imports adapters.
+- [x] `app/services/whatsapp_cloud.py` — **new.** `WhatsAppCloudProvider` (all four methods
+      + `health_check`), `MetaWebhookVerifier` (GET challenge + POST HMAC),
+      `MetaWebhookParser` (Meta JSON → flat events), `classify_graph_error` and
+      `normalize_msisdn` as pure, independently testable functions.
+- [x] Message sending — plain text, template messages, parameterized templates (positional
+      body + header components), and language selection with locale normalisation
+      (`pt-BR` → `pt_BR`).
+- [x] Status handling — Meta's `sent`/`accepted`/`delivered`/`read`/`failed` mapped onto
+      `CampaignRecipient` statuses; `deleted` deliberately ignored; `QUEUED`/`REPLIED` left as
+      CRM-internal states with no Meta equivalent.
+- [x] Webhook — `GET /whatsapp/webhook/meta` verifies the subscription challenge and echoes it
+      as plain text; `POST /whatsapp/webhook/meta` verifies `X-Hub-Signature-256` over the
+      **raw body** and rejects invalid signatures with 403. **No JWT on either**, per
+      instruction; both fail closed when their secret is unset.
+- [x] Reply handling — `MetaWebhookService` routes parsed events into the existing pipeline
+      (`apply_delivery_status` / `record_reply`). No duplicated business logic; the monotonic
+      status guard, lead-status automation, timeline entries and follow-up triggers are all
+      the existing implementations, reached unchanged.
+- [x] Error handling — 429 rate limits (retried, honouring `Retry-After`), expired access
+      token (**not** retried), invalid template (**not** retried), network timeout (retried),
+      provider unavailable (retried), bad recipient (**not** retried). Nothing raises into
+      campaign execution; every failure lands on the recipient row with its Meta error code.
+- [x] `app/api/v1/endpoints/whatsapp.py` — **+3 routes** (Meta webhook GET/POST, provider
+      status). Existing routes untouched.
+- [x] `app/api/deps.py` — `get_meta_webhook_service` added; existing providers unchanged.
+- [x] `tests/test_whatsapp_cloud.py` — 11-section suite, Graph API fully mocked via
+      `httpx.MockTransport`. **No real WhatsApp account required.** Covers configuration
+      validation, message sending, template sending, status mapping, webhook verification,
+      reply handling and provider failures, plus phone normalisation, campaign execution and
+      registry selection.
+- [x] Full regression sweep — **15/15 non-ERP suites pass**, including the pre-existing
+      `tests/test_whatsapp.py`. The 3 ERP suites fail on the documented pre-existing
+      `Photographer` fixture, confirmed identical on a stashed (untouched) tree.
+
+### Notable findings
+
+**1. The rendered-string contract cannot survive contact with Meta, and the fix was already
+in the port.** Meta rejects free text outside a 24-hour service window (error 131047), so
+campaign messaging *must* use pre-registered templates. Rather than widening the port (which
+would make it Meta-shaped) or moving rendering into the adapter (which the spec forbids), the
+adapter uses `template_name` and `language` — which the port already forwarded "for vendors
+that require a pre-registered template identifier". **Operational consequence: a CRM template's
+`name` must match an approved template in Meta Business Manager.** Detail in `walkthrough.md` §3.
+
+**2. Retrying every failure would have been actively harmful.** An expired token retried once
+per recipient turns a five-minute credential rotation into 15,000 doomed calls against Meta's
+rate limiter. Auth, template and bad-recipient errors are classified as **non**-retryable and
+fail immediately; only 429s, timeouts and 5xx are retried. Meta returns **400 for both** an
+expired token and a rate limit, so classification is by error *code* first and HTTP status
+second. The tests assert **call counts**, not just results — a result-only assertion passes
+even with the retry policy inverted. Detail in §4.
+
+**3. The test suite caught a real webhook-parsing bug.** The first parser used
+`(entry or {}).get(...)`, which guards `None` but lets a *string* through to the next `.get()`,
+raising `AttributeError`. Since **a webhook that raises is one Meta retries until it disables
+the subscription**, this would have been a production outage triggered by one malformed
+payload. Fixed with a type-checking `_as_dict()` helper at every nested access. A suite that
+only fed well-formed payloads would have shipped it. Detail in §9.
+
+**4. Webhook signature verification must read the raw body.** The endpoint deliberately does
+not declare a Pydantic body model: the HMAC covers the exact bytes Meta sent, and letting
+FastAPI parse-then-re-serialise produces different bytes whose signature never matches. This is
+the easiest way to get webhook verification subtly and permanently wrong. Detail in §7.
+
+### Known gaps / follow-ups for a later phase
+
+1. **A retried timeout can duplicate a message.** Meta's `/messages` endpoint has no
+   idempotency key, so a request that timed out *after* Meta processed it is indistinguishable
+   from one that never arrived. Bounded retries and never-retrying-a-2xx limit the exposure;
+   a client-side dedupe window keyed by (recipient, template, minute) is the real fix and is
+   worth adding before high-volume sending.
+
+2. **Dispatch is still synchronous inside the HTTP request.** Real Meta latency is
+   ~100–300ms/message, so a 1,000-lead campaign is now a multi-minute request. **A task queue
+   is the single most valuable next addition.** The port is already async, so moving the
+   dispatch loop into a worker requires no interface change. Retry backoff is capped at 30s
+   specifically because of this constraint.
+
+3. **Rate limiting is reactive.** The adapter retries a 429 rather than pacing sends beneath
+   Meta's tier limit. A token-bucket throttle in the campaign loop would be strictly better
+   and belongs with the task queue (gap 2).
+
+4. **`reply_type` classification is keyword-based.** Safe (it returns `None` when unsure, so an
+   ambiguous reply never writes a lead off as LOST) but it will miss Malayalam/Hindi replies
+   and indirect phrasing. The rules are data in one list, so replacing them is contained.
+
+5. **Template parameters are a single positional value.** The whole rendered body is passed as
+   `{{1}}`. A Meta template with three separate placeholders needs the CRM to model its
+   parameter *structure* — a `provider_template_name` + parameter-mapping column on
+   `whatsapp_templates`. First thing to add when a template needs more than one variable.
+
+6. **No template-catalogue sync.** Nothing validates a CRM template name against the WABA's
+   approved template list, so a mismatch fails at send time (132001) rather than at save time.
+   A sync endpoint reading the catalogue would catch it earlier.
+
+7. **The webhook has no replay/dedupe log.** Harmless for statuses (the monotonic rank guard
+   makes a repeated status a no-op) but a re-delivered *reply* appends a second timeline entry.
+   Storing seen message ids with a short TTL would close it.
+
+8. **`get_message_status` returns `None` by design** — the Cloud API has no status-read
+   endpoint; delivery state is push-only. Implemented explicitly rather than left inherited so
+   the fact is documented where someone will look for it.
+
+
+---
+
+## Lead CRM Dashboard — Frontend Module
+
+**Status:** Complete
+
+**Scope:** Build the Lead CRM Dashboard as the CRM's landing page, consuming the **existing
+backend APIs only**. This is the first phase of the project's pivot from a full Colour Lab ERP
+to a Lead CRM focused on photographer acquisition.
+
+**No backend business logic was modified.** No endpoint, service, repository, model, schema or
+migration was touched — the entire phase is frontend. The ERP modules named as out of scope
+(Orders, Production, Inventory, Payments, Deliveries, Customer Management) were **not** built
+on and **not** deleted; their routes remain reachable by direct URL but are no longer part of
+the sidebar navigation (see "Decisions taken" §3).
+
+### Checklist
+
+- [x] `src/features/leads/types.ts` — **new.** TypeScript mirrors of the backend response
+      schemas (`LeadResponse`, `FollowUpTaskResponse`, `FollowUpStatisticsResponse`,
+      `ImportJobResponse`, `WhatsAppCampaignResponse`, `CampaignRecipientResponse`) plus the
+      seven status enums and the derived view-model types the widgets consume. A generic
+      `Paginated<T>` captures the envelope every list endpoint returns.
+- [x] `src/services/leads.ts` — **new.** All HTTP access for the domain:
+      `leadsService` (list + `count`), `followUpsService` (today / statistics / complete /
+      reschedule), `leadImportsService`, `campaignsService` (list + recipients) and
+      `leadEmployeesService`. No component or hook calls axios directly.
+- [x] `src/features/leads/hooks.ts` — **new.** All business logic: the eight-counter fan-out,
+      the cross-campaign replies assembly, the task↔lead↔employee joins, the three chart
+      aggregations, the campaign funnel, and the two follow-up mutations with their cache
+      invalidation.
+- [x] **Section 1 — Lead Summary Cards.** All eight counters (Total, New, Message Sent,
+      Replied, Interested, Negotiation, Follow-up Today, Lost), each a drill-through link to a
+      pre-filtered lead list. Loading, empty and error states all covered.
+- [x] **Section 2 — Recent Replies.** Lead name, phone, reply preview (truncated), relative
+      reply time with the absolute timestamp on hover, lead status badge and an Open Lead
+      button.
+- [x] **Section 3 — Today's Follow-ups.** Lead name, phone, scheduled time, follow-up type,
+      assigned employee, plus working **Complete** and **Reschedule** actions. Reschedule opens
+      a validated date/time dialog.
+- [x] **Section 4 — Recent Lead Imports.** Provider, import time, leads imported, new,
+      duplicate, failed and status — as a scrollable table on desktop, stacked cards on mobile.
+- [x] **Section 5 — WhatsApp Campaign Summary.** Campaign name, sent, delivered, read, replies
+      and interested leads.
+- [x] **Section 6 — Quick Actions.** Import Leads, Create Campaign, View Leads and Today's
+      Follow-ups, each gated on its own permission and hidden when not held.
+- [x] **Section 7 — Charts.** Lead Sources (donut), Lead Status Distribution (bar), Daily Lead
+      Growth (14-day line) and Campaign Performance (grouped bar), all via the existing
+      `recharts` dependency.
+- [x] **Section 8 — Layout.** Uses the existing `AppLayout`, the existing UI component library
+      (`Card`, `StatCard`, `Badge`, `Button`, `Dialog`, `Input`, `Textarea`, `Skeleton`,
+      `EmptyState`, `ErrorState`, `LayoutHelpers`), TanStack Query for all server state,
+      Zustand (`useAuthStore` for RBAC, `useNotificationStore` for mutation toasts), the
+      existing RBAC guards, and a responsive 1/2/4-column grid.
+- [x] **Section 9 — Architecture.** Feature-scoped under `src/features/leads/`
+      (`types.ts` / `hooks.ts` / `components/` / `pages/`), matching the existing
+      `src/features/*` shape. API logic in services, business logic in hooks, no duplicated
+      components — two new reusable widgets (`DashboardSection`, `LeadStatusBadge`) absorb what
+      would otherwise have been repeated six times.
+- [x] `src/App.tsx` — the index route now renders `LeadDashboardPage`; seven Lead CRM routes
+      added as placeholders so every link on the dashboard resolves.
+- [x] `src/layouts/AppLayout.tsx` — sidebar repointed to Lead CRM navigation; `isNavItemActive`
+      extracted so both the desktop and mobile navs share one active-route rule.
+- [x] `src/tests/leadDashboard.test.tsx` — **new, 62 tests** across services, hooks, widget
+      states, actions, RBAC and helpers.
+- [x] **`npm test` passes: 191/191 across 10 files.** **`npm run build` succeeds.**
+
+### Pre-existing breakage fixed to meet the verification requirement
+
+Both `npm test` and `npm run build` were **already failing before this phase began**, from one
+root cause: `ProductSelector` requires a `products` prop that two of its callers never passed.
+
+- `npm run build` — 3 TypeScript errors (`AddItemDialog.tsx:96`, `OrderItemEditor.tsx:45,113`).
+- `npm test` — 1 failing test (`orders.test.tsx`), `products.map` on `undefined`.
+
+Both callers already received `products` in their own props and simply failed to forward it, so
+the fix is two one-line prop additions. Reported here rather than folded in silently: it is ERP
+code, outside this phase's scope, and touched only because the phase's verification criteria
+could not otherwise be met.
+
+### Decisions taken
+
+**1. Recent Replies is assembled client-side, because no endpoint returns it.**
+Reply text lives on `campaign_recipients.reply_text` and is reachable only per-campaign via
+`GET /whatsapp/campaigns/{id}/recipients`. With backend changes out of scope, `useRecentReplies`
+fans out over the five most recent campaigns, filters each to `message_status=REPLIED`, joins
+each recipient to its lead, then merges and sorts by `replied_at`. **Consequence:** an N+1 of at
+most six requests, and replies from leads never enrolled in a recent campaign do not appear. A
+`GET /whatsapp/replies/recent` endpoint would collapse this to one request.
+
+**2. The eight counters are eight separate requests.**
+No endpoint returns a status histogram — `GET /dashboard` is entirely ERP (revenue, orders,
+deliveries, invoices) and carries nothing lead-related. Each counter is therefore a
+`GET /leads?status=X&limit=1` probe read for its `total`, which the backend computes ignoring
+pagination. Payloads stay at one row each and TanStack Query issues them concurrently. The
+alternative — fetching 500 leads and tallying client-side — is silently wrong past 500 rows.
+
+**3. ERP frontend code was kept, not deleted.**
+The sidebar now lists only Lead CRM destinations and `/` renders the Lead CRM dashboard, but the
+Orders feature, the ERP dashboard and the ERP routes remain on disk and reachable by direct URL.
+Chosen over deletion because it removes ERP from the product surface without discarding working
+code and its passing tests.
+
+**4. "Follow-up Today" counts tasks, not leads.**
+It reads `GET /followups/statistics.due_today` — open tasks due today — rather than leads in
+`FOLLOW_UP` status. These are different questions; the card carries a "Tasks due today" footer
+so the figure is not misread.
+
+**5. "Interested Leads" per campaign is computed, and is present-tense.**
+Not a backend counter. `useCampaignSummary` intersects each campaign's recipients with leads
+currently in `INTERESTED` status, so it reflects status *now*, not at send time. The column
+header carries this as a tooltip.
+
+### Known gaps / follow-ups for a later phase
+
+1. **The Lead Sources and Daily Lead Growth charts describe a 500-lead sample, not the whole
+   table.** `GET /leads` caps `limit` at 500 and there is no aggregation endpoint, so both
+   charts aggregate the most recent 500 leads. The hook returns `isSampled`, and both chart
+   subtitles say "most recent 500" when it is true — the figure is never presented as a
+   full-table total. A `GET /leads/statistics` returning source and status histograms would fix
+   this properly and would also collapse decision §2's eight requests into one.
+
+2. **Recent Replies costs up to six requests and misses non-campaign replies** (decision §1).
+   The single highest-value backend addition for this page.
+
+3. **The lead sample is fetched once and shared, which bounds the name lookups.** Replies,
+   follow-ups and campaign summary all resolve lead names from the same cached 500-lead query
+   (one request, not three). A lead outside that sample degrades gracefully — the reply shows
+   the phone number, the follow-up shows the task title — but is not resolved to a business
+   name. Per-id lead fetches or an `ids` filter on `GET /leads` would close it.
+
+4. **Employee names come from an unpaginated `GET /employees` fetch** capped at 200. A larger
+   organisation would need the assignee name denormalised onto the follow-up response, or an
+   `ids` filter.
+
+5. **The dashboard's link destinations are placeholders.** `/leads`, `/leads/import`,
+   `/leads/:id`, `/followups`, `/campaigns`, `/campaigns/new` and `/campaigns/:id` are
+   permission-guarded stubs so no link 404s. Building them out is the next phase.
+
+6. **No auto-refresh.** Data is fetched on mount and on explicit Refresh; there is no polling or
+   websocket, so a reply arriving while the page is open is not shown until refresh. A
+   `refetchInterval` on the replies and follow-ups queries is the cheap version.
+
+7. **The production bundle is 1.14 MB (335 KB gzipped) and Vite warns about it.** Pre-existing
+   and not worsened materially here, but the ERP feature code still ships in it. Route-level
+   `React.lazy` splitting is the fix, and deleting the ERP frontend (decision §3) would help.
+
+8. **`npm run lint` cannot run — `eslint` is not installed** in this project's `node_modules`
+   despite the script existing in `package.json`. Typechecking is covered via `tsc` in
+   `npm run build`, which passes clean.
+
+## Lead Details Workspace — Frontend Phase
+
+**Status:** Complete
+
+**Scope:** The Lead Details page (`/leads/:id`) as the primary workspace for managing one lead —
+profile, activity timeline, notes, follow-ups, WhatsApp history, quick actions and status panel,
+built on the existing backend API. **No ERP functionality** was built or modified (Orders,
+Payments, Inventory, Production, Delivery, Invoices, Photographers are untouched). Exactly one
+backend line changed — see the Backend note below.
+
+### Checklist
+
+- [x] `src/features/leads/types.ts` — extended with `LeadActivity`, `LeadNote`, `ActivityType`
+      (all 17 enum members), `LeadUpdatePayload`, `FollowUpCreatePayload`, `FollowUpCancelPayload`,
+      `LeadWhatsAppHistoryEntry`, and `last_contacted_at` on `Lead`.
+- [x] `src/services/leads.ts` — added `leadActivitiesService` (timeline paging),
+      `leadNotesService` (list/create/update/remove across the two backend roots),
+      `leadsService.update`, and `followUpsService.listByLead` / `.create` / `.cancel`.
+- [x] `src/features/leads/detailHooks.ts` — 14 hooks: `useLead`, `useUpdateLead`,
+      `useUpdateLeadStatus`, `useLeadActivities`, `useLeadNotes` + 3 note mutations,
+      `useLeadFollowUps` + 4 lifecycle mutations, `useLeadWhatsAppHistory`.
+- [x] `src/features/leads/utils.ts` — `mapsUrlFor`, `normalizePhone`, `telHref`, `whatsAppHref`,
+      `externalHref`, `instagramHref`, `mailtoHref`, `formatAddress`.
+- [x] Components: `LeadProfileCard`, `LeadActivityTimeline`, `LeadNotesSection`,
+      `LeadFollowUpsSection`, `LeadWhatsAppHistory`, `LeadQuickActions`, `LeadStatusPanel`,
+      `EditLeadDialog`, `CreateFollowUpDialog`. `RescheduleDialog` and `DashboardSection` were
+      **reused** from the dashboard phase rather than reimplemented.
+- [x] Page: `LeadDetailsPage` — composition, dialog state and per-section RBAC only.
+- [x] Route wired into `src/App.tsx` — the `leads/:id` placeholder replaced with the real page,
+      still behind `ProtectedRoute requiredPermission="leads:view"`.
+- [x] All 8 specified sections built; all 18 profile fields, all 10 timeline events, all 7 quick
+      actions, all 4 follow-up actions.
+- [x] `src/tests/leadDetails.test.tsx` — 76 tests covering the six required areas (profile
+      rendering, timeline loading, notes CRUD, follow-up actions, status updates, RBAC) plus the
+      utils, services and hooks beneath them.
+- [x] `npm run test` — 267/267 tests passing (11 files, including the new suite).
+- [x] `npm run build` — `tsc` + `vite build` succeed with zero TypeScript errors.
+
+### Backend change (one line)
+
+`app/schemas/lead.py` — `last_contacted_at: datetime | None` added to **`LeadResponse` only**.
+
+The column already exists on `Lead` and is already maintained by the WhatsApp module (stamped on
+dispatch and on reply), but `LeadResponse` inherits `LeadBase`, which does not declare it — so the
+value never reached the client. It was added to the response schema and deliberately **not** to
+`LeadBase`/`LeadCreate`/`LeadUpdate`, which would have made server-maintained contact history
+client-writable. No service, repository, endpoint, model or migration changed.
+
+### Design decisions
+
+1. **Google Maps URL is derived from `latitude`/`longitude`, not stored.** There is no
+   `google_maps_url` column; the Maps import provider computes a `source_url` but `LeadImportService`
+   folds it into the lead's free-text `remarks` instead of persisting it as a field. `mapsUrlFor()`
+   builds the link from the coordinate columns — which covers Maps-sourced leads, the ones that have
+   coordinates — and returns `null` otherwise, in which case the profile **hides the row** rather
+   than rendering a dead link.
+
+2. **WhatsApp history is a bounded client-side fan-out.** `GET /whatsapp/campaigns/{id}/recipients`
+   has no `lead_id` filter and there is no lead-scoped message-history route, so the hook fetches
+   recent campaigns, fans out over their recipients, and keeps rows matching this lead — the same
+   pattern `useRecentReplies` established on the dashboard. Capped at
+   `LEAD_CAMPAIGN_HISTORY_LIMIT = 10`, and the truncation is **reported** via `isSampled` rather
+   than hidden, since a silently partial history reads as "never messaged".
+
+3. **The timeline accumulates pages instead of replacing them.** `useLeadActivities` renders every
+   page `0..n-1` through `useQueries` and concatenates, so Load More grows the list, each page is
+   its own cache entry, and invalidation refreshes all loaded pages without collapsing back to one.
+   Rows are de-duplicated by id, because an activity written between two page fetches shifts the
+   boundary row and can deliver it twice.
+
+4. **Status changes are confirmed and carry `version`.** A status change writes to the immutable
+   timeline and moves dashboard counters, so it is two-step. `version` is sent so a change issued
+   from a stale page returns 409 `VERSION_CONFLICT` instead of clobbering a concurrent edit; the
+   panel renders that as readable text.
+
+5. **Query keys nest under a shared `detail(leadId)` prefix**, so "refresh all related queries after
+   update" is one `invalidateQueries` call covering profile, timeline, notes and follow-ups.
+   `useUpdateLead` additionally invalidates the dashboard's `summary()`/`sample()` keys, since a
+   status change makes those per-status counters wrong.
+
+6. **The edit form submits a diff, not the whole form.** Only changed fields plus `version` are
+   sent; a cleared optional field sends `null` (not `""`, which the backend's URL/email validators
+   reject); and a no-op save closes without issuing a request. Sending the full form would turn any
+   concurrent edit into silent data loss even when the two edits touched different fields.
+
+7. **`Select`'s `placeholder` could not be used for "Unassigned".** It renders as
+   `<option disabled hidden>`, so it cannot be re-selected — a form where a task could be assigned
+   but never un-assigned. Both assignee selects use a real `{ label: 'Unassigned', value: '' }`
+   option instead.
+
+8. **Overdue requires open *and* `is_overdue`.** The server-computed flag is authoritative (there is
+   no sweeper, so stored `status` can lag), but it can remain true on a task since completed — so
+   the highlight and count require both, or a task completed two days late would show "Overdue"
+   forever. Lifecycle actions render only on open tasks, since the backend 400s on closed ones.
+
+9. **RBAC is per-control and mirrors the endpoints.** `leads:update` for edit/status/notes (notes
+   reuse the lead permission set server-side), `followups:view`/`create`/`update` for the follow-up
+   controls, `whatsapp:view`/`create` for WhatsApp. Copy Phone / Open WhatsApp / Call Now are
+   **ungated** — they touch no API, and gating them would restrict nothing while making the rail
+   feel broken. `EditLeadDialog` is unmounted, not merely hidden, without `leads:update`.
+
+10. **"Send WhatsApp" opens a wa.me conversation.** There is no per-lead send endpoint — the backend
+    dispatches per campaign (`POST /whatsapp/campaigns/{id}/start`) — so the action opens the chat
+    rather than pretending a one-off API send exists. Still gated on `whatsapp:create`.
+
+### Known gaps / follow-ups for a later phase
+
+1. **WhatsApp history covers only the 10 most recent campaigns** (decision §2). A `lead_id` filter on
+   the recipients endpoint, or a `GET /leads/{id}/whatsapp-history` route, would make it complete and
+   collapse the fan-out to a single request. Highest-value backend addition for this page.
+
+2. **Leads without coordinates show no Maps link** (decision §1), even when the importer captured a
+   real Maps URL into `remarks`. A `google_maps_url` column populated from the provider's
+   `source_url` would fix it properly.
+
+3. **Author and assignee names come from an unpaginated `GET /employees`** capped at 200 — the same
+   limitation the dashboard carries. Denormalising the author name onto `LeadNoteResponse` and
+   `FollowUpTaskResponse` would remove the dependency.
+
+4. **Timeline activity-type filtering is not exposed in the UI.** The endpoint and the service layer
+   both support `activity_type`; the spec asked for pagination rather than filtering, so no control
+   was built. Small addition when wanted.
+
+5. **No follow-up edit or reassign.** `PUT /followups/{id}` and `PUT /followups/{id}/assign` exist and
+   are unused — the spec listed create / complete / cancel / reschedule only.
+
+6. **No auto-refresh.** Fetch-on-mount plus the explicit Refresh button; a reply arriving while the
+   page is open is not shown until refreshed.
+
+7. **The production bundle is now 1.19 MB (348 KB gzipped)**, up ~50 KB from this phase and still
+   un-split. Route-level `React.lazy` remains the fix.
+
+8. **`npm run lint` still cannot run — `eslint` is not installed** in `node_modules` despite the
+   script existing in `package.json`. Pre-existing and unrelated to this phase; typechecking is
+   covered by `tsc` inside `npm run build`, which passes clean.
+
+---
+
+## Lead Pipeline (Kanban Board) — Frontend Phase
+
+**Status:** Complete
+
+**Scope:** The Lead Pipeline board at `/leads` — every lead grouped into a column per status, with
+drag-and-drop between columns, filters, sorting, per-column incremental loading, column totals and
+per-card quick actions. **No ERP functionality** was built or modified (Orders, Payments,
+Inventory, Production, Delivery, Invoices, Photographers are untouched). One backend enum value was
+renamed — see the Backend change note below.
+
+### Checklist
+
+- [x] `app/models/lead.py` — `LeadStatus.CUSTOMER` renamed to `CONVERTED` (+ migration, + the two
+      service call-sites). See "Backend change" below.
+- [x] `alembic/versions/a1f4c7b93e02_rename_lead_status_customer_to_converted.py` — in-place
+      Postgres enum rename, applied and verified against the live database.
+- [x] `src/features/leads/types.ts` — `PipelineSort`, `PipelineFilters`, `PipelineColumnState`
+      added; `LeadStatus` updated to `CONVERTED`.
+- [x] `src/services/leads.ts` — `leadPipelineService.column()` (one filtered request per column)
+      and `.moveToStatus()` (the narrow status-only write behind a drop), plus
+      `followUpsService.pending()` for the cards' due-date badges.
+- [x] `src/features/leads/pipelineUtils.ts` — `PIPELINE_COLUMNS`, `sortLeads` (4 comparators),
+      `isMoveAllowed`, `hasActiveFilters`, `EMPTY_PIPELINE_FILTERS`, `PIPELINE_DND_MIME`.
+- [x] `src/features/leads/pipelineHooks.ts` — `usePipelineBoard` (per-column paged fetching +
+      accumulation + totals), `useMoveLeadStatus` (optimistic move with whole-board rollback),
+      `usePipelineDragAndDrop` (drag state machine + toasts), `usePipelineFollowUpDueDates`,
+      `usePipelineCreateFollowUp`, `usePipelineCreateNote`.
+- [x] Components: `PipelineColumn`, `PipelineCard`, `PipelineFiltersBar`, `AddNoteDialog`.
+      `CreateFollowUpDialog` and `LeadStatusBadge` were **reused** from earlier phases rather than
+      reimplemented.
+- [x] Page: `LeadPipelinePage` — composition, filter/sort state and dialog state only.
+- [x] Route wired into `src/App.tsx` — the `leads` placeholder replaced with the real board, still
+      behind `ProtectedRoute requiredPermission="leads:view"`.
+- [x] All 9 columns; all 7 card fields; all 5 filters; all 4 sorts; all 4 quick actions; column
+      totals; per-column Load More.
+- [x] `src/tests/leadPipeline.test.tsx` — 72 tests covering the six required areas (column
+      rendering, drag-and-drop, status updates, filters, sorting, RBAC) plus the utils, services
+      and hooks beneath them.
+- [x] `npm run test` — 339/339 passing (12 files, including the new suite).
+- [x] `npm run build` — `tsc` + `vite build` succeed with zero TypeScript errors.
+- [x] Backend regression: `tests/test_lead_activities.py`, `tests/test_whatsapp.py` and
+      `tests/test_followups.py` all pass against the live database after the rename.
+
+### Backend change (one enum value)
+
+The brief specified a **`CONVERTED`** column, but `LeadStatus` had no such member — its
+terminal-success value was `CUSTOMER`. Dropping a card on a "Converted" column would have sent an
+invalid enum value and been rejected with a 422. Rather than label the column with a word the API
+does not speak, the enum member was renamed (confirmed with the requester before doing so):
+
+- `app/models/lead.py` — `CUSTOMER = "CUSTOMER"` → `CONVERTED = "CONVERTED"`.
+- `app/services/lead.py:208` — the conversion-detection transition now compares against
+  `LeadStatus.CONVERTED`.
+- `app/services/whatsapp.py:105` — `_TERMINAL_LEAD_STATUSES`, the guard stopping an inbound reply
+  from demoting a converted lead, now holds `LeadStatus.CONVERTED`.
+- `alembic/versions/a1f4c7b93e02` — `ALTER TYPE lead_status RENAME VALUE 'CUSTOMER' TO 'CONVERTED'`.
+
+**`app/models/photographer.py` declares a *separate* `LeadStatus` that keeps its own `CUSTOMER`
+member**, on a different Postgres type (`leadstatus`, no underscore). It was deliberately left
+alone, and both types were re-inspected in the database after the migration to confirm the rename
+touched only `lead_status`. `app/services/photographer.py` is unchanged.
+
+The rename is exact rather than additive: Postgres cannot drop an enum member, so an
+add-plus-backfill would have left `CUSTOMER` permanently reachable. `RENAME VALUE` rewrites the
+catalog label without rewriting a single row, and the downgrade is its exact inverse.
+
+### Design decisions
+
+1. **Nine columns, not eight.** The brief listed eight and omitted `CONTACTED`, which is a real,
+   reachable status. A board without it would hide every lead sitting there and give them no column
+   to be dragged out of, so it is rendered in its pipeline position between New and Message Sent.
+   Confirmed with the requester.
+
+2. **One request per column, not one for the board.** `GET /leads` caps `limit` at 500 and returns
+   no status histogram. Fetching everything and grouping client-side would truncate silently and
+   report per-column totals that only describe the first 500 rows. Nine filtered requests give each
+   column an exact `total` from its own envelope and let one column paginate without refetching the
+   rest.
+
+3. **Native HTML5 drag-and-drop, no library.** No DnD library was installed, and adding one was not
+   necessary. The native API keeps cards as plain elements that jsdom can exercise with real
+   `dragStart`/`dragOver`/`drop` events — so the drag behaviour is genuinely unit tested rather than
+   mocked away. The cost is that HTML5 drag supports neither keyboard nor touch, which is why every
+   card also carries a **"Move…" select** performing the identical mutation through the identical
+   code path. That control is not a fallback bolted on afterwards; it is the accessible primary path.
+
+4. **The column is the drop target, not the card.** A lead can therefore be dropped into the empty
+   space below the last card — and into an **empty column**, which would otherwise be the one place
+   a card could never be moved to.
+
+5. **`dragCounter` prevents highlight flicker.** `dragleave` fires when the pointer crosses into a
+   *child* of the drop target, so a naive enter/leave toggle makes the column strobe as the cursor
+   passes over each card. Enters minus leaves, clearing only at zero, is the fix — and is covered by
+   a test that walks the exact enter/enter/leave/leave sequence.
+
+6. **Optimism is a whole-board snapshot, not a per-card one.** A single move mutates several cache
+   entries: the source column's page, the destination's page, and both columns' totals. Rolling back
+   only the card would leave the counts wrong, so `onMutate` snapshots every entry under the board
+   prefix via `getQueriesData` and `onError` restores all of them. `cancelQueries` runs first, or an
+   in-flight column fetch resolving after the optimistic edit would snap the card back.
+
+7. **Sorting is client-side, and the UI says so.** `GET /leads` accepts no `sort`/`order_by`
+   parameter. Ordering is therefore applied per column after each page arrives — exact for a
+   fully-loaded column, approximate for a partial one, since the server picks which 20 rows page 1
+   holds. Every partially-loaded column header reads "Showing N of M" rather than implying a
+   complete ranking.
+
+8. **`LAST_CONTACTED` sinks never-contacted leads.** A null `last_contacted_at` is not "contacted
+   long ago"; treating it as epoch 0 would float those leads to the top of a descending sort, which
+   is the opposite of what the sort is for. Nulls go last, and a test pins it.
+
+9. **Follow-up due dates come from one bulk read, not an N+1.** The due date is not a column on
+   `Lead`, and `GET /followups?lead_id=` takes a single id — one request per visible card would mean
+   dozens per board render. The hook reads the open worklist once (ordered soonest-first, the API's
+   own ordering) and indexes it by `lead_id`. Stated plainly: a lead whose only open follow-up falls
+   outside the 200 most imminent tasks shows no due date on its card. That is decoration on a card;
+   the Lead Details page remains authoritative.
+
+10. **Blank filters are stripped, not sent.** The backend matches `city`/`district` with `ILIKE
+    %value%`, so `city=` is a literal empty-string match returning nothing. The service drops empty
+    values rather than making every caller remember to.
+
+11. **City and District are free-text, not selects.** The backend matches them partially and exposes
+    no endpoint enumerating distinct values — a dropdown would have to be built by scanning a lead
+    sample and would silently omit every place not in that sample.
+
+12. **RBAC is per-control and mirrors the endpoints.** `leads:update` gates the "Move…" control (it
+    performs the same write a drop does), `followups:create` gates Create Follow-up, `whatsapp:create`
+    gates Send WhatsApp. **Open Lead is ungated** beyond the page's own `leads:view` — it navigates
+    and touches no API. Note that hiding the Move control does **not** disable native dragging, which
+    is a client-side gesture; the server still rejects the write. The guard mirrors the server, it
+    does not replace it.
+
+13. **The board scrolls horizontally at every breakpoint.** Nine columns cannot be made legible on a
+    phone at any width, and a wrapping grid destroys the left-to-right progression that makes a
+    pipeline readable. Columns keep a fixed width (widening slightly on `sm`) and each scrolls
+    vertically inside itself.
+
+### Known gaps / follow-ups for a later phase
+
+1. **Native drag is mouse-only.** HTML5 drag-and-drop fires no events for touch, so on a phone or
+   tablet the "Move…" select is the only way to change a status from the board. A pointer-events
+   based drag implementation (or `@dnd-kit`, which supports touch sensors) would close this. The
+   board is fully usable without it — this affects the gesture, not the capability.
+
+2. **No cross-column card ordering is persisted.** Cards are ordered by the chosen sort, not by a
+   user-defined rank, because `Lead` has no ordering column. Dropping a card into a specific
+   *position* within a column is therefore not meaningful — only the column it lands in matters.
+
+3. **Sorting only orders what has been loaded** (decision §7). An `order_by` parameter on
+   `GET /leads` would make it exact and is the single highest-value backend addition for this page.
+
+4. **Follow-up due dates are bounded to 200 open tasks** (decision §9). A `lead_id__in` filter, or
+   denormalising the next due date onto `LeadResponse`, would make the badge complete.
+
+5. **No realtime or polling.** The board fetches on mount with a 30s stale window and an explicit
+   Refresh button; a lead moved by a colleague is not reflected until one of those happens.
+
+6. **Assignee names still come from an unpaginated `GET /employees`** capped at 200 — the same
+   limitation the dashboard and details pages carry. A lead assigned to the 201st employee shows
+   "Unassigned".
+
+7. **The production bundle is 1.21 MB (353 KB gzipped)**, up ~24 KB from this phase and still
+   un-split. Route-level `React.lazy` remains the fix.
+
+8. **`npm run lint` still cannot run — `eslint` is not installed** in `node_modules` despite the
+   script existing in `package.json`. Pre-existing and unrelated to this phase; typechecking is
+   covered by `tsc` inside `npm run build`, which passes clean.
+
+## Lead Import — Frontend Phase
+
+**Status:** Complete
+
+**Scope:** The Lead Import screen at `/leads/import` — provider selection (Google Maps, Instagram,
+CSV), keyword and result-limit inputs, drag-and-drop CSV upload, live import progress, an outcome
+summary, run history with retry, and lifetime statistics. **The backend was not modified**: the
+import engine, providers, deduplication, API endpoints and schemas were consumed exactly as they
+already existed. No ERP functionality, no database schema, no provider implementation, no
+deduplication logic and no WhatsApp code was touched.
+
+### Checklist
+
+- [x] `src/features/leads/types.ts` — `ImportJobDetail`, `ImportJobLogEntry`, `ImportProvider`,
+      `ImportProviderList`, `ImportRunPayload`, `ImportStatistics`, `ImportJobListParams` added;
+      `ImportJobStatus` corrected to include `CANCELLED` (the backend enum has six members, the
+      frontend type declared five).
+- [x] `src/services/leads.ts` — `leadImportsService` extended with `runImport`, `importCsv`,
+      `listProviders`, `listJobsFiltered`, `getJob`, `getStatistics` and `retryJob`. API calls only,
+      on the existing shared Axios instance — no second client was created.
+- [x] `src/features/leads/importUtils.ts` — pure helpers: the provider capability catalogue, CSV
+      validation, duration/byte/provider formatting, status→Badge mapping, and
+      `toFriendlyErrorMessage` (the single place raw backend errors are translated).
+- [x] `src/features/leads/importValidation.ts` — Zod schema factory, built per provider so the
+      "keyword required" rule follows the registry rather than a hardcoded provider list.
+- [x] `src/features/leads/importHooks.ts` — business logic: `useImportProviders`,
+      `useImportHistory`, `useImportStatistics`, `useProviderBreakdown`, `useLeadImport`
+      (the import mutation, its toasts and its cache invalidation) and `useRetryImport`.
+- [x] Components (presentational only): `ProviderSelector`, `CsvDropZone`, `ImportResultSummary`,
+      `ImportHistoryTable`, `ImportStatsCards`.
+- [x] Page: `src/features/leads/pages/ImportLeadsPage.tsx` — composition and form wiring only.
+- [x] Route wired into `src/App.tsx` — the "Coming in the next phase" placeholder replaced, and the
+      guard corrected from `leads:create` to `leads:import` (see "Route permission" below).
+- [x] Reused `Button`, `Card`, `Input`, `NumberInput`, `ProgressBar`, `StatCard`, `Spinner`,
+      `Badge`, `EmptyState`, `ErrorState`, `Skeleton`, `FilePreview` and the existing
+      `ToastProvider`/`useNotificationStore`. No new design-system component was added.
+- [x] `src/tests/importLeads.test.tsx` — 61 tests covering all twelve required areas.
+- [x] `npm run test` — 400/400 passing (13 files, including the new suite).
+- [x] `npm run build` — `tsc` + `vite build` succeed with zero TypeScript errors.
+
+### Route permission (one-line frontend fix, no backend change)
+
+The placeholder route was guarded on `leads:create`, but every import endpoint in
+`app/api/v1/endpoints/lead_imports.py` enforces **`leads:import`** — a deliberately separate
+permission, because bulk-importing hundreds of leads has a different blast radius from adding one by
+hand. Left as it was, a user holding `leads:create` but not `leads:import` would have reached the
+page and had every request rejected with a 403. The route now matches the API. `leads:import` is
+already seeded in `scripts/seed_roles.py:86`, so no backend or seed change was needed.
+
+### Design decisions
+
+1. **No `FileUpload` component was created.** The brief named one, but `src/components/ui/` has no
+   such primitive. Rather than add a global component for a single call site, `CsvDropZone` composes
+   the primitives that do exist (`FilePreview`, `ProgressBar`). If a second screen ever needs file
+   upload, that component is the one to promote into `components/ui/`.
+2. **The provider list comes from the API, not a constant.** `is_available` is a deployment fact —
+   whether an API key is configured — so a hardcoded list would show Instagram as ready on a server
+   that cannot run it. Only the marketing copy (the ✔ bullets) is local, keyed by provider, and
+   merged onto whatever the registry returns; an unrecognised provider still renders.
+3. **The provider key is not a form field.** It lives in the selector's state and is passed at
+   submit. An earlier revision mirrored it into the form via `setValue`, which produced two sources
+   of truth and a submit that silently failed validation on an empty `provider`.
+4. **No polling.** The backend runs collection synchronously and returns the finished job, so the
+   response *is* the result. Progress is therefore a real determinate bar during CSV upload and an
+   indeterminate one during server-side collection, rather than a fake percentage.
+5. **A successful import invalidates `leadKeys.all`, not just the import keys.** New leads exist, so
+   every lead list, count and chart is stale. One broad invalidation cannot miss a widget, and
+   TanStack Query only refetches what is mounted.
+6. **Raw 5xx bodies are never shown.** `toFriendlyErrorMessage` surfaces backend text only for the
+   statuses whose bodies are written for humans (400/404/409/422, which come from our own
+   `AppException`s); 5xx is replaced wholesale, since it may carry a stack trace.
+
+### Known gaps / follow-ups
+
+1. **The provider breakdown is derived from the loaded history page**, not a dedicated endpoint —
+   the statistics endpoint aggregates by status, and nothing aggregates by provider. The card says
+   so when more runs exist than were read.
+2. **Import history is a single page of 10** with a Refresh button; no pagination controls yet.
+3. **Per-record import logs are not surfaced.** `GET /leads/imports/{id}` returns them and
+   `getJob`/`ImportJobLogEntry` are in place, but no drill-in view consumes them yet.
+4. **`npm run lint` still cannot run** — `eslint` is not installed and is not even a declared
+   devDependency. Pre-existing; `tsc` inside `npm run build` passes clean.
+
+---
+
+## OpenStreetMap / Overpass Lead Provider (free replacement for Google Maps)
+
+**Phase goal.** Replace the **paid** Google Maps provider with a **free** one: collect
+photography businesses from OpenStreetMap via the public Overpass API, behind the existing
+`LeadProvider` interface, so a search costs nothing and requires no API key.
+
+Scope note: this phase touched **only** the collection path. The **CRM and `Lead` models were
+not modified** — no column, no enum member, and therefore **no Alembic migration**. WhatsApp,
+Lead Management, Orders, Inventory, Payments, Production, Delivery, Dashboard and
+Authentication were not modified, and no endpoint was added — `POST /api/v1/leads/import` is
+reused exactly as it stands.
+
+### Checklist
+
+- [x] `OverpassLeadProvider` in `app/services/lead_providers/overpass.py`, reusing the
+      existing `LeadProvider` interface — `search(query)` / `collect()` / `normalize()`.
+- [x] Built on the **public Overpass API**, with no credential of any kind.
+- [x] Accepts **city**, **category** and **radius_km** (the last two via
+      `ProviderContext.options`, which is exactly what that free-form field exists for — a
+      parameter no other adapter has, added without widening the shared dataclass).
+- [x] **City → latitude/longitude via Nominatim**, one geocode per run, biased to India
+      (`countrycodes=in`) and narrowed by `state` when supplied.
+- [x] Overpass QL generated for photography tags: `shop=photo`, `office=photographer`,
+      `studio=photography` as specified, **plus** `craft=photographer` and `shop=photo_studio`
+      — `craft=photographer` outnumbers `office=photographer` in OSM's real data, and omitting
+      it halves the yield.
+- [x] All three element types queried (`node` / `way` / `relation`), with `out center` so ways
+      and relations come back with a usable coordinate.
+- [x] Query executed and **every** returned element parsed.
+- [x] Extracts, whenever available: business name, address, phone, email, website, coordinates
+      — plus city / district / state / country / pincode / categories / OSM permalink.
+- [x] Normalized into the existing `NormalizedLead` model, unchanged.
+- [x] **Nothing is saved to the database.** The module imports no model, no repository and no
+      session; `collect_normalized()` returns `NormalizedLead` objects and nothing else. This
+      is asserted structurally in the test suite via `inspect.getsource`.
+- [x] **Overpass rate limits respected** — outbound calls serialised behind a lock and spaced
+      by `OVERPASS_MIN_REQUEST_INTERVAL_SECONDS`, a required `User-Agent`, a bounded radius,
+      and a server-side `[timeout:N]` held below the client timeout.
+- [x] **Retry with exponential backoff** — `base * 2**attempt`, capped; `Retry-After` honoured
+      over the computed delay (and itself capped); `429`/`504`/`5xx`/transport faults retried;
+      `400`/`403` deliberately **not** retried.
+- [x] Unit suite `tests/test_overpass_import.py` — 10 sections, entirely mocked Overpass and
+      Nominatim responses, **no database and no network**.
+- [x] Registered under the new key `overpass`, **alongside** `google_maps` rather than over it.
+- [x] `walkthrough.md` and `task.md` updated.
+
+### Files
+
+| File | Change |
+|---|---|
+| `app/services/lead_providers/overpass.py` | **New** — the provider. |
+| `tests/test_overpass_import.py` | **New** — 10-section unit suite. |
+| `app/core/config.py` | New `OVERPASS_*` / `NOMINATIM_*` settings block; nothing existing altered. |
+| `app/services/lead_providers/__init__.py` | One import line + one `__all__` entry. |
+| `tests/test_lead_import.py` | Registry assertion now expects 9 providers, not 8. |
+
+`google_maps.py`, `base.py`, `normalized.py`, `planned.py`, `lead_import.py`, all models and
+all endpoints are byte-for-byte unchanged.
+
+### Design decisions
+
+1. **Two calls per import, not N+1 — the cost model evaporates.** Google needed a Text Search
+   plus one *billed* Place Details call per business, which drove three separate mitigations
+   (limit applied before the fan-out, bounded concurrency, a switch to disable details).
+   Overpass returns everything in one query, so none of that machinery exists here. What
+   replaces it is politeness, because the public endpoints are donated capacity governed by a
+   usage policy — the failure mode is being blocked, not an invoice.
+2. **The rate limiter holds its lock across the whole request, not just the sleep.** The usage
+   policy asks for roughly one query at a time from a client, so the correct model is a queue,
+   not a token bucket. Holding the lock for the request duration is what makes two *concurrent*
+   imports through one provider instance queue instead of doubling the observed load; a bare
+   `asyncio.sleep` between calls would not achieve that, and the test measures it.
+3. **`400`/`403` are not retried.** Only `{429, 500, 502, 503, 504}` and transport faults are.
+   A malformed query or a block is a final answer, and retrying it adds load to an endpoint
+   that has already said no — which is itself the behaviour that earns a block.
+4. **`Retry-After` beats the computed backoff, but is still capped.** The server knows when it
+   will be ready; ignoring an explicit instruction is the fastest way to lose access. The cap
+   stops a mistaken or hostile header from parking an import for hours.
+5. **`city` is mandatory here though it was optional for Google.** Overpass is queried by
+   coordinates, and the city is what gets geocoded — with none there is no query to build.
+   `search()` refuses at request time, before the job is marked RUNNING.
+6. **`category` does not narrow the Overpass query.** OSM has no free-text index to narrow
+   *with*; the tag filters are the only selectivity the API offers. The category is recorded
+   and surfaces as a lead category tag. Filtering names client-side would drop correctly
+   tagged studios whose names simply lack the operator's word.
+7. **City falls back to the searched city when the element has no `addr:city`.** Unsound for a
+   general geocoder, sound here: every element is by construction within `radius_km` of that
+   city's centre. Without a city, `normalize_business_key` cannot produce a key at all, so the
+   same studio re-collected next month would import twice.
+8. **`lead_source = "GOOGLE_MAPS"`.** `LeadSource` is an enum on `app/models/lead.py`, which
+   this phase was told not to modify; adding `OPENSTREETMAP` would mean a model edit plus an
+   `ALTER TYPE` migration. Overpass leads are map-listing leads, so reusing the member keeps
+   every existing dashboard, filter and dedup rule working and keeps this a pure provider-layer
+   addition. See the follow-up below.
+9. **Registered alongside `google_maps`, not over it.** Both are selectable at request time, so
+   the two can be compared on the same city before the paid one is retired — and retiring it
+   later is deleting one import line. A hard cutover on a provider with materially different
+   coverage would be a one-way door.
+10. **Backoff delays are recorded, not spent, in tests.** `asyncio.sleep` is swapped for a
+    recorder, so the suite asserts the computed policy in milliseconds. A retry suite that
+    really slept would take half a minute and would be the first thing a developer skips.
+
+### Verification
+
+```
+python tests/test_overpass_import.py       # ALL 10 SECTIONS PASSED
+python tests/test_lead_import.py           # unchanged, still passing (9 providers)
+```
+
+The Overpass suite touches **no database and no network** — it needs no `.env`, no Postgres and
+no credential, and is safe to run anywhere.
+
+### Known gaps / follow-ups
+
+1. **Expect a higher failed-record rate than Google Maps.** OSM's photography coverage in India
+   is thinner, and many OSM elements carry a name and a location but **no phone**, which
+   `NormalizedLead.is_valid()` rejects. Each such record is counted and logged with its reason,
+   so the job log stays honest — but size `limit` expectations accordingly. This is the trade
+   for a free provider, not a defect in the adapter.
+2. **`LeadSource.OPENSTREETMAP` is not added.** Overpass leads are attributed `GOOGLE_MAPS`
+   (decision 8). Whenever a `Lead` model change is in scope, adding the member plus an enum
+   migration and flipping one class attribute would make attribution literal; nothing else
+   would need to change.
+3. **No email/website enrichment beyond the tags.** OSM's `email` and `contact:email` are read
+   directly — a genuine gain over Google Places, which returns no email at any price — but a
+   business that publishes an address only on its own site stays without one. Crawling the
+   website would be a different integration with different consent implications.
+4. **The frontend provider selector has no marketing copy for `overpass`.** The Lead Import
+   screen reads the provider list from the API, so `overpass` appears and is selectable
+   automatically — but its ✔ bullets are keyed by provider locally and will be absent, and the
+   screen has **no input for `radius_km`**, so imports run at the configured default until a
+   field is added.
+5. **A single Nominatim result is trusted.** `limit=1` with an India bias; an ambiguous city
+   name shared by two Indian towns resolves to whichever Nominatim ranks first. Supplying
+   `state` disambiguates. Surfacing the resolved `display_name` back to the operator for
+   confirmation would close this properly.
+6. **The public endpoint is the default.** For sustained or heavy use the Overpass usage policy
+   recommends a dedicated instance; `OVERPASS_BASE_URL` is configurable for exactly that, and
+   `OVERPASS_USER_AGENT` should be set to a real contact address in production.
+
+---
+
+## Website Discovery — Lead Enrichment (`WebsiteDiscoveryService`)
+
+**Phase goal.** Extend the lead discovery pipeline with an enrichment step: for every
+normalized lead that arrived **without** a website, search the public web on business name +
+city, discover the official site, validate it belongs to the same business, ignore directory
+sites, and return the enriched `NormalizedLead`.
+
+Scope note: this phase is **additive and read-only**. Nothing is written to the database —
+the new module imports no model, no repository and no session. The `Lead` model, `LeadSource`,
+every provider, `LeadImportService` and every endpoint are **unchanged**, and **no Alembic
+migration** was generated because nothing schema-shaped changed. The service is not yet wired
+into the import path; that is a deliberate follow-up (see below).
+
+### Checklist
+
+- [x] **Separate `WebsiteDiscoveryService`** in `app/services/website_discovery.py` — a
+      service, not a `LeadProvider`. A provider answers "what businesses exist"; this answers
+      "given a business, what is its website". Folding it into an adapter would mean
+      re-implementing it in every adapter that returns websiteless records (Overpass and
+      Instagram both do).
+- [x] **Rule 1 — search the public web on business name + city.** `_build_query` joins the
+      two; city is what disambiguates the many studios sharing a common name across India,
+      the same reason `normalize_business_key` includes it.
+- [x] **Rule 2 — discover the official website**, via a pluggable `SearchBackend` port with a
+      zero-credential `DuckDuckGoSearchBackend` default.
+- [x] **Rule 3 — validate it belongs to the same business.** `_score_candidate` requires
+      token overlap between the business name and the domain, corroborated by the result
+      title and city. Below `WEBSITE_DISCOVERY_MIN_CONFIDENCE` the lead is returned unchanged.
+- [x] **Rule 4 — directory websites ignored.** ~90 domains (Justdial, Sulekha, IndiaMART,
+      WeddingWire, WedMeGood, Facebook, Instagram, Google Maps, linktr.ee, …), matched on the
+      domain *and any subdomain of it*, rejected **before** scoring so rank cannot rescue one.
+- [x] **Rule 5 — only the official domain is saved.** The deep URL that happened to rank is
+      reduced to its registrable domain; path, query string, fragment and `www.` are dropped.
+- [x] **Rule 6 — existing websites are never overwritten.** Checked first, before any work,
+      so a lead that already has one issues **no outbound search at all**.
+- [x] **Rule 7 — returns the enriched `NormalizedLead`.** A new instance; the input is never
+      mutated and every other field survives the round trip.
+- [x] **No database writes.** Asserted structurally in the suite via `inspect.getsource`, and
+      by `discover()`'s signature carrying no session parameter.
+- [x] Rate-limited and politeness-headed, on the same reasoning as the Overpass adapter — the
+      default backend is an unmetered public endpoint, so the failure mode is being blocked.
+- [x] Unit suite `tests/test_website_discovery.py` — **no database, no network**. (Extended to 15 sections by the follow-up phase below.)
+- [x] `walkthrough.md` and `task.md` updated.
+
+### Files
+
+| File | Change |
+|---|---|
+| `app/services/website_discovery.py` | **New** — the service, the directory list and the scorer. (The `SearchBackend` port and the DuckDuckGo backend were later extracted into `app/services/lead_providers/web_search/` — see the follow-up phase below.) |
+| `tests/test_website_discovery.py` | **New** — unit suite (later extended to 15 sections). |
+| `app/core/config.py` | New `WEBSITE_DISCOVERY_*` settings block; nothing existing altered. (The search-transport half was later renamed to `WEB_SEARCH_*`.) |
+
+Every provider, `base.py`, `normalized.py`, `lead_import.py`, all models, all schemas and all
+endpoints are byte-for-byte unchanged.
+
+### Design decisions
+
+1. **A service, not a provider.** The `LeadProvider` contract is `search → collect →
+   normalize` over a *query*; discovery is a function of an *existing lead*. Keeping it
+   separate means it composes with every provider at once — Overpass and Instagram both emit
+   websiteless leads — and is testable on a hand-built `NormalizedLead` with no provider,
+   no context and no network.
+2. **The search backend is a port, defaulting to a keyless engine.** "Search the public web"
+   has no single correct implementation: an operator with a Google CSE or Brave key wants
+   that, an operator with neither still wants the feature to work. `SearchBackend` is a
+   one-method ABC; `DuckDuckGoSearchBackend` is the credential-free default, for exactly the
+   reason `OverpassLeadProvider` was added alongside the billed Google adapter. Adding a keyed
+   engine is a new class plus one registry entry — this service does not change.
+3. **Validation is the hard part; search is not.** A search for "Sunrise Studio Kozhikode"
+   always returns *something*. The risk is not finding nothing, it is confidently attaching
+   the wrong domain — which is worse than an empty field, because an empty field visibly
+   reads as a gap while a wrong one looks like data. Hence two defences in order: reject
+   directories outright, then require what survives to *earn* its place.
+4. **Directory rejection precedes scoring, not follows it.** Justdial and WeddingWire rank
+   *above* a small studio's own site for precisely the query this service issues, so a
+   "take the first result" implementation would attach a directory to the majority of leads.
+   Rejecting before scoring is what guarantees rank can never rescue one. Subdomains are
+   matched too, because directories serve city pages from them (`kozhikode.justdial.com`).
+5. **Generic photography vocabulary carries no identity.** "photography", "studio", "wedding",
+   "films" and ~50 others are stripped before matching: "Sunrise Photography" and "Lakeside
+   Photography" are unrelated businesses, and matching on the shared word would validate
+   either one's domain against the other's name. When *every* token is generic ("The Photo
+   Studio") the full list is used as a fallback and the confidence threshold decides.
+6. **Declining to guess is a supported outcome, not a failure.** `below_threshold` is a
+   first-class status carrying the best candidate's score and reasoning, so an operator can
+   see the service considered a domain and rejected it. This is the behaviour the asymmetry
+   in decision 3 demands.
+7. **The domain is stored, not the ranking URL.** A lead's website is the business's site,
+   not the one page a search engine chose to surface. `sunrisestudio.in/gallery?ref=ddg#top`
+   becomes `https://sunrisestudio.in`, and several pages of one site collapse to one candidate.
+8. **Every decision is explainable after the fact.** `discover_with_outcome()` returns a
+   `DiscoveryOutcome` carrying the status, confidence, the evidence that produced it, and the
+   directories rejected. `discover()` stays a plain lead-in/lead-out function for the common
+   case — the same split `LeadProvider` makes between `collect()` and `collect_normalized()`.
+9. **Nothing raises.** A network fault, a challenge page, a backend bug and a lead with no
+   website all resolve to "returned unchanged". This is enrichment: an import of two hundred
+   leads must never fail because one of them could not be resolved. Section 10 of the suite
+   asserts it, including for a backend that violates the contract and raises `RuntimeError`.
+10. **The SERP parse degrades to nothing, never to garbage.** The DuckDuckGo HTML endpoint is
+    not a documented API, so the parse is anchored on the stable `result__a` / `result__snippet`
+    class names and skips anything unrecognised. A SERP redesign costs recall; it cannot
+    produce wrong URLs. Regex rather than an HTML parser because none is a dependency of this
+    project and adding one for a single defensive extraction is not worth the supply-chain surface.
+11. **Rate limited like Overpass, for the same reason.** The default backend is donated public
+    capacity, so calls are serialised behind a lock held *across the request* (not merely
+    across the sleep), spaced by a configured interval, and sent with an identifying
+    User-Agent. The failure mode for bursting is a block, not an invoice.
+12. **Not yet wired into `LeadImportService`.** The brief asked for the service and no
+    database writes; wiring it into the import path is a behavioural change to every import
+    run and a separate decision. See the follow-up below.
+
+### Verification
+
+```
+python tests/test_website_discovery.py    # ALL 15 SECTIONS PASSED (after the follow-up phase)
+python tests/test_overpass_import.py      # unchanged, still passing
+python -c "from app.main import app"      # app imports cleanly with the new settings
+```
+
+The suite touches **no database and no network** — it needs no `.env`, no Postgres and no
+credential, and is safe to run anywhere.
+
+### Known gaps / follow-ups for a later phase
+
+1. **Not wired into the import pipeline (decision 12).** `LeadImportService._process_records`
+   does not call it yet, so no import run is enriched today. Wiring it is roughly: construct
+   the service, `await service.discover_many(records)` between `collect_normalized()` and
+   `_process_records()`, and log each `DiscoveryOutcome.detail` into the job's log array.
+   That should land with an operator-facing switch (`enrich_websites: bool` on the import
+   request), because it adds one outbound search per websiteless lead to every run.
+2. **`registrable_domain` is not a public-suffix-list implementation.** It strips `www.` and
+   lowercases; it does not consult the PSL. Sufficient for comparison and directory matching,
+   and it has no stale-dataset failure mode — but a domain under an unusual multi-part suffix
+   is tokenized slightly imprecisely, which can only cost a little confidence, never
+   misattribute.
+3. **The directory list is static and India-weighted.** ~90 domains chosen for this CRM's
+   market. A new aggregator, or a regional one outside India, is not rejected until it is
+   added. Promoting the list to a config value or a small table would let an operator extend
+   it without a deploy.
+4. **The candidate's site is never fetched.** Validation uses the domain, the SERP title and
+   the snippet only. Fetching the homepage and checking it for the lead's phone number would
+   be materially stronger evidence — it is the single highest-value improvement available here
+   — but it is a second outbound request per lead and a different consent posture, so it was
+   left out of a phase specified as "search, validate, return".
+5. **DuckDuckGo may serve a challenge page under load.** The parse degrades to zero results
+   (decision 10) and the lead is returned unchanged, so the failure is safe but silent-ish —
+   it surfaces as `no_candidates`, indistinguishable from a business that genuinely has no
+   site. An operator seeing a run where *every* lead reports `no_candidates` should suspect
+   the backend, and a keyed backend is the fix.
+6. **No confidence is persisted.** `DiscoveryOutcome.confidence` and its reasoning exist only
+   for the duration of the call; once wired in, only the URL would reach the `Lead` row. If
+   operators need to review borderline attributions, the score belongs in the job log at
+   minimum, and arguably on the lead itself.
+
+---
+
+## Web Search Abstraction — Website Discovery, Phase 2 (`web_search/`)
+
+**Phase goal.** Promote the search backend from a section inside `website_discovery.py` to a
+**pluggable package of its own**, and close the four operational gaps the first phase left:
+live URL validation, retries with exponential backoff, robots.txt compliance, and a bounded
+redirect budget.
+
+Scope note: this phase is **additive and still read-only**. No model, no schema, no endpoint
+and no UI changed, and the Alembic autogenerate check produced an **empty** migration
+(`upgrade()`/`downgrade()` both `pass`), confirming **no migration is required**. The
+Overpass provider, the Import Leads UI and the Lead model are byte-for-byte unchanged, and
+the Google Maps provider is not involved.
+
+### Checklist
+
+- [x] **`app/services/lead_providers/web_search/base.py`** — the port: `SearchResult`
+      (`title`, `url`, `snippet` — nothing more), the `SearchBackend` ABC, `SearchBackendError`,
+      and a `@register_search_backend` registry with `get_search_backend()`.
+- [x] **`app/services/lead_providers/web_search/duckduckgo.py`** — the default backend. All
+      HTML parsing, the redirect-wrapper unwrapping, the rate limiter, the retry schedule and
+      robots.txt handling are **isolated here**, per the brief.
+- [x] **`WEB_SEARCH_BACKEND=duckduckgo`** configurable setting, plus the transport knobs
+      (`WEB_SEARCH_TIMEOUT_SECONDS`, `WEB_SEARCH_MAX_ATTEMPTS`,
+      `WEB_SEARCH_RETRY_BACKOFF_SECONDS`, `WEB_SEARCH_MAX_REDIRECTS`,
+      `WEB_SEARCH_RESPECT_ROBOTS`, …). **No credential setting exists**, and the suite asserts
+      that no `WEB_SEARCH_*_KEY|TOKEN|SECRET` can be added unnoticed.
+- [x] **No lead or database logic in the search provider.** The backend imports no model, no
+      repository, no session and not even `NormalizedLead`; asserted on the source in the suite.
+- [x] **Rule 4, completed — the discovered URL is now validated for real.** `_validate_website`
+      shape-checks the scheme and host, then confirms something answers: `HEAD` first, falling
+      back to `GET` on 405/501, under a short dedicated timeout and a **bounded** redirect
+      budget. A failure yields `validation_failed` and leaves the website **empty**.
+- [x] **A failed lookup never fails the lead.** Search faults, validation faults, exhausted
+      retries and backend bugs all resolve to "lead returned unchanged".
+- [x] **Retries with exponential backoff and jitter** — only for 429/5xx and transport faults.
+      A 403 is *not* retried, because retrying a block hastens it.
+- [x] **robots.txt fetched and honoured**, cached per process; an *unreachable* robots.txt is
+      treated as allowed rather than as a ban.
+- [x] Suite extended to **15 sections**, still **no database and no network** — every HTTP
+      call, including robots.txt, is served by `httpx.MockTransport`.
+- [x] Alembic autogenerate check run: **empty migration → none required**.
+- [x] `walkthrough.md` and `task.md` updated.
+
+### Files
+
+| File | Change |
+|---|---|
+| `app/services/lead_providers/web_search/__init__.py` | **New** — package entry point; imports backends for their registration side effect. |
+| `app/services/lead_providers/web_search/base.py` | **New** — `SearchResult`, `SearchBackend`, `SearchBackendError`, the registry, `get_search_backend()`. |
+| `app/services/lead_providers/web_search/duckduckgo.py` | **New** — the default backend: HTML parse, rate limiter, retries/backoff, robots.txt, bounded redirects. |
+| `app/services/website_discovery.py` | **Modified** — backend code removed (now imported from the package and re-exported for compatibility); `_validate_website` added; new `validation_failed` status. |
+| `app/core/config.py` | **Modified** — `WEBSITE_DISCOVERY_*` search-transport settings renamed to `WEB_SEARCH_*` and extended; two validation knobs added. |
+| `tests/test_website_discovery.py` | **Modified** — 10 → 15 sections; new coverage for validation, retries/backoff, robots/redirects, no-credentials and duplicate results. |
+
+`app/models/`, `app/schemas/`, `app/repositories/`, every endpoint, `overpass.py`, the Import
+Leads UI and every Alembic version are **unchanged**.
+
+### Design decisions
+
+1. **The package boundary is enforced in both directions.** `web_search/` knows nothing about
+   leads; `website_discovery.py` knows nothing about HTML SERPs. The seam is `SearchResult` —
+   three strings. This is what makes a future Google CSE or Brave backend a new file rather
+   than an edit to the service, and it is asserted in section 14, which greps the backend
+   source for `NormalizedLead`, `AsyncSession`, `app.models` and `app.repositories`.
+2. **Registration is a decorator, not a dict entry.** `@register_search_backend` puts the
+   declaration and the wiring on the same line in the same file, so a backend cannot be
+   written and then silently left unreachable — the same pattern `lead_providers/base.py`
+   already uses for providers.
+3. **An unknown backend key degrades rather than raises** — the opposite of `get_provider`,
+   deliberately. A wrong *provider* key means an operator asked for data we cannot supply and
+   must be told. A wrong *search* key would only mean one enrichment step used a different
+   engine; since discovery writes nothing and weak results are discarded by the threshold
+   anyway, falling back to the free default beats failing an import run.
+4. **Validation is a reachability check, not a content check.** It answers "does something
+   answer here", not "is this the right business" — that is the scorer's job, and conflating
+   the two would let a reachable wrong domain pass on the strength of returning HTTP 200.
+   `HEAD` first because it is far cheaper; `GET` on 405/501 because enough small hosts reject
+   `HEAD` that treating it as failure would discard working sites.
+5. **Only retryable faults are retried.** 429 and 5xx are transient; a 403 is a decision about
+   *this client* and retrying it only arrives at a block faster. Backoff is
+   `base * 2**(attempt-1)` with **full jitter**, because several concurrent imports that all
+   failed on one upstream blip would otherwise retry in lockstep and reproduce the burst.
+6. **An unreachable robots.txt means "allowed", not "forbidden".** A file we could not fetch
+   is not a directive to stay away; treating it as one would disable discovery entirely on any
+   transient network fault. An explicit `Disallow` *is* honoured, and the verdict is cached for
+   the process lifetime — re-fetching it per search would itself be the traffic robots.txt
+   exists to limit.
+7. **Redirects are bounded everywhere.** Both the search request and the validation request
+   carry `max_redirects=WEB_SEARCH_MAX_REDIRECTS`. Unlimited following turns a parked-domain
+   redirect loop into a request that consumes the whole timeout budget.
+8. **Old import paths still work.** `SearchResult`, `SearchBackend`, `SearchBackendError` and
+   `get_search_backend` are re-exported from `website_discovery`, so the move is not a
+   breaking change for anything that imported them — they are aliases, not a second copy.
+9. **The settings split mirrors the code split.** `WEB_SEARCH_*` configures the swappable
+   transport; `WEBSITE_DISCOVERY_*` configures the scoring and validation that are *not*
+   swappable. Which knob belongs to which layer is readable from its name.
+
+### Verification
+
+```
+python tests/test_website_discovery.py    # ALL 15 SECTIONS PASSED
+python tests/test_lead_discovery.py       # ALL 8 SECTIONS PASSED
+python tests/test_contact_extractor.py    # ALL 17 SECTIONS PASSED
+python tests/test_overpass_import.py      # ALL 10 SECTIONS PASSED (provider untouched)
+npm run test                              # 452 passed (13 files)
+npm run build                             # tsc + vite build clean
+alembic revision --autogenerate           # empty upgrade()/downgrade() → no migration needed
+```
+
+### Known gaps / follow-ups for a later phase
+
+1. **Still not wired into `LeadImportService`.** Unchanged from the previous phase:
+   `LeadDiscoveryService` calls it, but the plain import path does not. Wiring it needs an
+   operator-facing switch, since it adds an outbound search per websiteless lead.
+2. **robots.txt matching is minimal, not RFC 9309.** It evaluates the `User-agent: *` group
+   only, with simple prefix matching and no full `Allow`-precedence rules. It errs toward not
+   fetching when a rule matches. `urllib.robotparser` is stdlib but synchronous and would
+   block the event loop on its own fetch, so only the matching is reimplemented.
+3. **Validation confirms reachability, not ownership.** A domain that scores well and returns
+   HTTP 200 is accepted; the page body is never inspected. Fetching the homepage and matching
+   the lead's phone number remains the highest-value improvement available — and is now much
+   cheaper to add, since the validation request already exists.
+4. **Only one backend ships.** The registry, the port and the config are all in place for a
+   keyed engine, but `duckduckgo` is the only registered key today. Adding Google CSE or Brave
+   is a new module plus a `WEB_SEARCH_BACKEND` value, with no change to the service.
+5. **Contact extraction is deliberately out of scope**, per the brief — this phase discovers
+   the official website only. `ContactExtractorService` is the separate phase that consumes it.
+
+---
+
+## Contact Extraction — Lead Enrichment (`ContactExtractorService`)
+
+**Phase goal.** Extend the lead enrichment pipeline with the step that follows website
+discovery: for a normalized lead that **has** a website, visit it, read the header, footer,
+contact page and about page, extract phone numbers, WhatsApp numbers, email addresses,
+Instagram/Facebook/YouTube links, normalize them all, and return the enriched
+`NormalizedLead`.
+
+This is the improvement `walkthrough.md` named as the highest-value one available after
+discovery: a studio's own site is the most authoritative contact source there is, and far
+better evidence than a directory listing.
+
+Scope note: this phase is **additive and read-only with respect to the database**. The new
+module imports no model, no repository and no session. The `Lead` model, every endpoint and
+the CRM schema are **unchanged**, and `alembic revision --autogenerate` produces an **empty
+migration** (verified, then deleted) because nothing schema-shaped changed.
+
+`NormalizedLead` — the in-memory DTO, *not* a database table — gained two optional fields,
+`whatsapp_numbers: list[str]` and `youtube: str | None`, both defaulted so every existing
+provider and caller is unaffected. This is the "smallest backwards-compatible extension" the
+brief asks for: WhatsApp numbers have to be storable *separately* from ordinary phones, and
+carrying them in `raw` (as the first cut did) meant the one place that needs them —
+`secondary_phone`, which fills the CRM's `whatsapp` column — could not see them.
+
+### Checklist
+
+- [x] **Separate `ContactExtractorService`** in `app/services/contact_extractor.py` — a
+      service, not a `LeadProvider`, the same shape as `WebsiteDiscoveryService`. Discovery
+      answers "what is this business's website"; this answers "given the website, how do I
+      contact them". They compose in that order.
+- [x] **Visits the website** of a `NormalizedLead`. A lead with no website is returned
+      untouched, with no request issued at all.
+- [x] **Reads header, footer, contact page and about page.** Header and footer are scanned
+      **first and separately**, then the whole document — because `NormalizedLead` promotes
+      `phone_numbers[0]` to the CRM's `phone` column, and the number a business leads with
+      belongs first. Footer/header are matched by tag, ARIA role **and** class/id convention,
+      since most small-business templates ship `<div class="site-footer">`, not `<footer>`.
+- [x] **Extracts** phone numbers, WhatsApp numbers, email addresses, and Instagram, Facebook
+      and YouTube links — from `href` attributes (authoritative) and from page text (fallback).
+- [x] **Normalizes every value** through `normalized.py`'s existing helpers, so extraction
+      produces exactly what the CRM already stores and deduplicates on.
+- [x] **Uses BeautifulSoup**, imported lazily (the `httpx` pattern) so a missing dependency
+      degrades enrichment instead of taking the API down at startup. `lxml` is used when
+      present, `html.parser` otherwise.
+- [x] **Respects `robots.txt`** via `urllib.robotparser`, fetched **once per host** and cached
+      — including across concurrent leads on that host. A `Disallow` is final: zero page
+      requests, lead untouched.
+- [x] **Crawl depth is one level, structurally.** One fetch for the home page, one fetch per
+      selected contact/about link, and links found on *those* pages are never followed. There
+      is no recursion, no work queue, and no depth parameter that could be raised.
+- [x] **The whole site is not crawled.** Off-host links are never followed, ordinary internal
+      links (`/gallery`, `/pricing`) are never fetched, and the second level is capped by
+      `CONTACT_EXTRACTION_MAX_SUBPAGES`.
+- [x] **No database writes.** Asserted structurally in the suite via `inspect.getsource`, and
+      by `extract()`'s signature carrying no session parameter.
+- [x] **Never overwrites.** `instagram`/`facebook` are filled only when empty; scraped phones
+      and emails are *appended* behind the provider's, deduplicated on the CRM's comparison
+      keys. The input lead is never mutated.
+- [x] Per-host rate limiting and an identifying User-Agent, on the same reasoning as the
+      Overpass and discovery adapters.
+- [x] **Phone parsing via `phonenumbers`** (libphonenumber). Every Indian form the brief lists
+      — `9876543210`, `+91 9876543210`, `+919876543210`, `0091 9876543210`, `080 12345678` —
+      parses, validates and normalises to **E.164**. Validity is checked against the real
+      numbering plan, so an order number or a GST identifier is rejected however many digits
+      it carries. Imported lazily: without the package, extraction falls back to the
+      structural heuristics rather than failing.
+- [x] **WhatsApp is stored separately** in `NormalizedLead.whatsapp_numbers`, populated only
+      from click-to-chat links (`wa.me`, `api.whatsapp.com/send`) — the one place a number is
+      *known* to be WhatsApp-reachable. No number is assumed to be on WhatsApp.
+      `secondary_phone` now promotes a known WhatsApp number into the CRM's `whatsapp` column
+      in preference to guessing at `phone_numbers[1]`.
+- [x] **Bounded transfer.** The body is **streamed** and abandoned the moment it passes
+      `CONTACT_EXTRACTION_MAX_PAGE_BYTES` (an oversized `Content-Length` is refused before any
+      body is read); redirects are capped by `CONTACT_EXTRACTION_MAX_REDIRECTS`, so a redirect
+      loop fails fast instead of running unbounded.
+- [x] **Ownership/relevance signal.** `_score_relevance` compares the fetched pages against the
+      lead's business name, city, known phone and email domain, returning a score in `[0,1]`, a
+      band (`owned`/`uncertain`/`unrelated`) and the individual signals. **Advisory only** — a
+      low score never discards the website or the extracted contacts; `LeadDiscoveryService`
+      decides.
+- [x] **Result statuses** distinguish `extracted`, `partial`, `no_contact_found`,
+      `fetch_failed`, `robots_blocked`, `invalid_content`, `no_website`. "Found nothing" is a
+      **success** (`succeeded` is True), not a system error.
+- [x] Unit suite `tests/test_contact_extractor.py` — **17 sections**, no database, no network.
+- [x] `walkthrough.md` and `task.md` updated.
+
+### Files
+
+| File | Change |
+|---|---|
+| `app/services/contact_extractor.py` | **New** — the service, the robots cache, the region/link selection, the extractors and the normalisers. |
+| `tests/test_contact_extractor.py` | **New** — 17-section unit suite. |
+| `app/core/config.py` | `CONTACT_EXTRACTION_*` settings block, plus `MAX_REDIRECTS`, `PHONE_REGION`, `MIN_RELEVANCE` and the brief's `WEBSITE_*` aliases. |
+| `app/services/lead_providers/normalized.py` | Two optional DTO fields (`whatsapp_numbers`, `youtube`); `secondary_phone` prefers a known WhatsApp number. |
+| `app/services/contact_normalization.py` | Canonicalises `whatsapp_numbers` by the same rules as ordinary phones. |
+| `app/services/lead_discovery.py` | The extraction stage records per-status and per-relevance counts in `StageStats.detail`. |
+| `requirements.txt` | Added `beautifulsoup4==4.12.3` and `phonenumbers==9.0.36`. |
+
+Every provider, `base.py`, `lead_import.py`, `website_discovery.py`, all models, all schemas
+and all endpoints are unchanged. The `Lead` table and the CRM schema are untouched.
+
+### Design decisions
+
+1. **A service, not a provider** — for the same reason discovery is one. The input is a
+   `NormalizedLead`, not a query, and it composes with every provider at once.
+2. **Depth is enforced by shape, not by a counter.** A `max_depth=1` parameter is one edit
+   away from `max_depth=3`. Instead there is exactly one home-page fetch and one round of
+   sub-page fetches, with no recursion and no queue — the module cannot become a crawler
+   without being restructured. The suite asserts this on the *actual request log*, not on the
+   return value, and separately greps the source for a work queue.
+3. **A page is fetched because it is a contact page, not because it exists.** A link
+   qualifies only if its text or path says contact/about, and it must be on the same host.
+   Fetching every internal link is precisely the crawl the brief forbids.
+4. **`robots.txt` absent means allowed; `robots.txt` present and denying means denied.** An
+   unreachable or 404 robots.txt permits fetching (the documented convention); a file that
+   parses and disallows us ends the extraction with zero page requests. Treating a broken
+   server as a prohibition would fail closed against sites that never configured anything.
+5. **Header and footer are scanned before the document body.** This is an *ordering* decision
+   with a real consequence: the first phone number becomes the CRM's `phone`. Source order
+   would let a number in a testimonial outrank the studio's own switchboard.
+6. **Links are authoritative; text is inference.** A `tel:`/`mailto:` href is a value the site
+   *declared*; a digit run in prose is a guess. Declared values lead the ordering, and the
+   text pass is defended by `_looks_like_phone` / `_valid_email`.
+7. **A wrong phone number is worse than a missing one** — it is the field the CRM deduplicates
+   on, so a bogus value can collapse two unrelated businesses onto one lead. Hence years,
+   prices, pincodes, placeholder runs, asset filenames (`logo@2x.png`), analytics DSNs and
+   platform furniture (`facebook.com/sharer/…`) are all rejected, and `<script>`/`<style>` are
+   stripped before any text is read.
+8. **WhatsApp is only claimed when the site claims it.** A number is recorded as WhatsApp only
+   from a `wa.me` / `api.whatsapp.com/send` link, which carries the number in the URL. A
+   number printed in a footer might or might not be on WhatsApp, and guessing would put a
+   wrong claim in front of an operator about to message it.
+9. **Existing provider data wins.** A Google Places record is better attributed than a regex
+   over HTML, so single-valued fields are filled only when empty and list fields are appended
+   to — mirroring rule 6 of website discovery.
+10. **`whatsapp_numbers` and `youtube` are DTO fields; `raw` keeps the full harvest.** The
+    first cut carried both in `raw` to avoid widening a shared contract. That was wrong for
+    WhatsApp specifically: the brief requires it stored *separately* from ordinary phones, and
+    `secondary_phone` — which fills the CRM's `whatsapp` column — cannot read `raw`. Both are
+    now optional, defaulted fields, so no existing provider or caller changes.
+    `raw["contact_extraction"]` still records the complete harvest and the page list, so a
+    value that lost to an existing field is visible rather than discarded.
+11. **Rate limiting is per host, not global.** The politeness obligation is owed to each
+    server individually: five pages on one small studio's site should queue; two unrelated
+    domains have no reason to.
+12. **Nothing raises.** A dead domain, TLS error, timeout, 404, non-HTML body, unparseable
+    markup and a robots prohibition all resolve to "returned unchanged".
+13. **Phone numbers are normalised to E.164 by libphonenumber, not by regex.** Indian sites
+    write one number five different ways; comparing or dialling them requires one canonical
+    form. libphonenumber also knows which ranges are *assignable*, which a digit-count
+    heuristic cannot — that is what keeps a 10-digit order number out of the phone field.
+14. **The ownership score is advice, never a verdict.** A real studio whose site is an
+    image-only splash page with its name in a logo scores near zero. Discarding on that would
+    lose a good lead, so the score, its band and its individual signals are *reported* and the
+    pipeline decides. This is the explicit instruction in the brief.
+15. **The size cap is enforced while streaming.** Reading a response fully and truncating
+    afterwards means a site advertising a 2 GB page has already been pulled into memory. An
+    oversized page is also *refused* rather than parsed as a prefix: half a document yields
+    half-parsed markup and phone numbers sliced across the boundary.
+16. **Wired into `LeadDiscoveryService`, behind an existing operator switch.** See "Integration"
+    below — the `extract_contacts` flag already existed, so nothing about the operator-facing
+    workflow changed.
+
+### Verification
+
+```
+python tests/test_contact_extractor.py    # ALL 17 SECTIONS PASSED
+python tests/test_website_discovery.py    # unchanged, still passing
+python -c "from app.main import app"      # app imports cleanly with the new settings
+```
+
+The suite touches **no database and no network** — every page and every `robots.txt` is served
+by an injected `httpx.MockTransport`, so the real fetch path, the real BeautifulSoup parse and
+the real robots handling are what is under test, with only the socket replaced.
+
+### Known gaps / follow-ups for a later phase
+
+1. **The relevance score is recorded but nothing acts on it yet.** Per-run counts land in
+   `StageStats.detail` (`relevance_owned` / `_uncertain` / `_unrelated`). A later phase could
+   let an operator review or auto-drop `unrelated` sites — deliberately not done here, since
+   acting on a heuristic silently is exactly what the brief warns against.
+2. **JavaScript-rendered sites yield nothing.** A site whose contact block is injected by
+   React at runtime has no contact details in the served markup. This resolves to
+   `no_contact_found` — safe, but indistinguishable from a site that publishes no contacts. A
+   headless-browser backend would fix it at a large cost in dependencies and runtime.
+3. **Obfuscated emails are not decoded.** Addresses written as `name [at] domain [dot] com`,
+   or assembled in JavaScript, are missed. Decoding the common textual patterns is cheap and
+   worth doing; decoding the JavaScript ones is not.
+4. **Contact pages behind a form are not submitted**, and never should be — the service reads
+   published pages only. A business exposing its number solely through a contact form is not
+   reachable by this route.
+5. **`raw["contact_extraction"]` is a Python dict, not a schema.** Once the service is wired
+   in and an endpoint surfaces it, that block should get a Pydantic projection like
+   `NormalizedLeadPreview`, rather than being consumed as a free-form dict.
+6. **The `_SOCIAL_NOISE_SEGMENTS` and hint lists are static.** A new platform URL shape, or a
+   site using an unusual word for its contact page ("say hello"), is missed until added.
+
+### Integration — is it wired in?
+
+**Yes, and no operator-facing workflow changed.** `LeadDiscoveryService` already had an
+enrichment stage for this, and `DiscoveryRunRequest` already carried an `extract_contacts`
+boolean (alongside `discover_websites`). The stage now calls `extract_many_with_outcomes`
+instead of `extract_many` so the per-lead statuses and ownership scores reach the run summary
+as `StageStats.detail`, e.g.:
+
+```json
+{"stage": "contact_extraction", "records_in": 25, "records_enriched": 14,
+ "detail": {"extracted": 12, "partial": 2, "no_contact_found": 8, "fetch_failed": 2,
+            "robots_blocked": 1, "relevance_owned": 11, "relevance_unrelated": 3}}
+```
+
+`detail` is **additive** — consumers reading only `stage`/`records_in`/`records_enriched`
+(including the frontend's `importLeads` tests) are unaffected. The stage also degrades
+gracefully: an injected extractor that offers only `extract_many` still works, since that is
+the interface this stage has always depended on.
+
+Per the brief, **no new endpoint was added and the Import Leads UI was not redesigned.** The
+`[ ] Discover websites` / `[ ] Extract contacts` choice the brief anticipates is already
+supported by the backend contract; surfacing it as checkboxes is a UI phase.
+
+⚠️ **Operational note:** `extract_contacts` defaults to `true`, so a discovery run visits the
+website of every lead that has one. With the shipped defaults that is bounded — at most
+`1 + CONTACT_EXTRACTION_MAX_SUBPAGES` (5) pages per lead, 3 leads at a time, one request per
+second per host — but it is real outbound traffic. An operator who wants map data alone sets
+`extract_contacts: false`.
+
+### Configuration
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `CONTACT_EXTRACTION_TIMEOUT_SECONDS` | `10.0` | Per-request timeout. |
+| `CONTACT_EXTRACTION_MAX_SUBPAGES` | `4` | Second-level contact/about pages per lead. |
+| `CONTACT_EXTRACTION_MAX_PAGE_BYTES` | `2_000_000` | Streamed body cap; exceeded ⇒ `invalid_content`. |
+| `CONTACT_EXTRACTION_MAX_REDIRECTS` | `5` | Redirect chain cap. |
+| `CONTACT_EXTRACTION_CONCURRENCY` | `3` | Leads visited at once. |
+| `CONTACT_EXTRACTION_MIN_REQUEST_INTERVAL_SECONDS` | `1.0` | Gap between requests to the *same* host. |
+| `CONTACT_EXTRACTION_RESPECT_ROBOTS` | `True` | Honour `robots.txt`. No operational reason to disable. |
+| `CONTACT_EXTRACTION_USER_AGENT` | identifying string | Sent on every request; **set a real contact address in production**. |
+| `CONTACT_EXTRACTION_PHONE_REGION` | `"IN"` | Region for parsing bare national numbers. |
+| `CONTACT_EXTRACTION_MIN_RELEVANCE` | `0.3` | Band boundary for the advisory ownership score. |
+
+The brief names five of these with a `WEBSITE_` prefix. Those names work as **aliases**:
+`WEBSITE_CONTACT_TIMEOUT`, `WEBSITE_MAX_PAGES_PER_LEAD`, `WEBSITE_MAX_RESPONSE_BYTES`,
+`WEBSITE_MAX_REDIRECTS`, `WEBSITE_MAX_CONCURRENT_REQUESTS`. Setting one in `.env` overrides
+its canonical counterpart, so a documented variable name is never silently ignored. Note
+`WEBSITE_MAX_PAGES_PER_LEAD` counts **total** pages including the home page, while
+`CONTACT_EXTRACTION_MAX_SUBPAGES` counts only the second level — they differ by one.
+
+### Privacy and compliance
+
+- Only **publicly published** business contact details are read — the same pages any visitor
+  sees. No login, no paywall, no form submission.
+- **`robots.txt` is honoured**, cached once per host, and a `Disallow` is final.
+- The service **identifies itself** by User-Agent and rate-limits per host.
+- **No social-media scraping and no platform APIs.** Instagram/Facebook/YouTube values are the
+  links the business publishes *on its own site*; those hosts are never requested. Asserted in
+  the suite against the recorded request log.
+- No Google Maps, no paid search APIs, no credentials of any kind.
+- Data collected is business contact information, not personal data about individuals; the
+  `owner_name` field is populated only when a site publishes it as a business contact.
+
+## Lead Discovery Pipeline (`LeadDiscoveryService`)
+
+**Phase goal.** Add the orchestrator that ties the existing collection and enrichment stages
+into one runnable pipeline:
+
+```
+city → Overpass provider → website discovery → website contact extraction
+     → normalization → deduplication → save new leads → summary
+```
+
+This is the wiring the two previous phases deliberately deferred. `WebsiteDiscoveryService`
+and `ContactExtractorService` both shipped unwired, each with a note in `task.md` saying the
+wiring "is small when it comes" and belongs with an operator-facing switch. This phase is
+that wiring, and it ships the switch (`discover_websites` / `extract_contacts`).
+
+Scope note: the service **orchestrates only**. It contains no scraping, no HTTP, no HTML
+parsing, no matching rules and no normalisation logic — every one of those already lives in a
+service with its own test suite, and duplicating any of it here would create two copies that
+drift. This is asserted structurally in the suite, not just documented. No model, schema,
+endpoint or provider changed, and **no Alembic migration** was generated because nothing
+schema-shaped changed.
+
+### Checklist
+
+- [x] **`LeadDiscoveryService`** in `app/services/lead_discovery.py` — orchestrates the six
+      stages and nothing else.
+- [x] **City is the input.** `run(db, city=...)` is the whole call; `query` defaults to
+      `"photography"` so a caller does not have to know the Overpass adapter needs a non-empty
+      query alongside the city it actually geocodes.
+- [x] **Every stage is dependency-injected** — `provider`, `website_discovery`,
+      `contact_extractor`, `contact_normalizer`, `deduplication_service`, `lead_repository`,
+      `activity_service`. All default to `None` and are resolved to the real implementation,
+      so production constructs with no arguments and tests inject stubs.
+- [x] **Provider resolution is lazy** (`provider` property), so constructing the service never
+      depends on provider-registration import order, and one adapter instance — therefore one
+      rate limiter — is reused across a run.
+- [x] **Returns `{found, imported, merged, duplicates, failed}`** exactly, via
+      `DiscoverySummary.to_dict()`. Diagnostics (per-stage counts, created/merged lead ids,
+      error lines) are attributes and `to_detailed_dict()`, so the five-key contract is not
+      widened.
+- [x] **The counters reconcile**: `imported + merged + duplicates + failed == found`, exposed
+      as `summary.reconciles`, logged at ERROR when it fails, and asserted on every scenario
+      in the suite.
+- [x] **Stages run as whole-batch passes**, so `discover_many` and `extract_many` fan out
+      under their own semaphores instead of serialising a hundred round trips.
+- [x] **Enrichment is best-effort, persistence is not.** Discovery and extraction never raise
+      by contract and are not wrapped in a mask; a failed *write* is caught per record, the
+      session rolled back, and the record counted in `failed`.
+- [x] **A source-level provider fault propagates** rather than being reported as `found: 0` —
+      "Overpass was unreachable" and "this city has no photographers" must not look identical.
+- [x] **Operator switches** — `discover_websites=False` / `extract_contacts=False` skip the
+      two network-touching stages for a re-run over an already-enriched city.
+- [x] Integration suite `tests/test_lead_discovery.py` — 8 sections, real database, real
+      deduplication and persistence, stubs for the three network stages.
+- [x] `walkthrough.md` and `task.md` updated.
+
+### Files
+
+| File | Change |
+|---|---|
+| `app/services/lead_discovery.py` | **New** — the orchestrator, `DiscoverySummary`, `StageStats`. |
+| `tests/test_lead_discovery.py` | **New** — 8-section integration suite. |
+
+Every provider, `base.py`, `normalized.py`, `website_discovery.py`, `contact_extractor.py`,
+`contact_normalization.py`, `lead_deduplication.py`, `lead_import.py`, all models, all schemas
+and all endpoints are **unchanged**. No new dependency, no config change.
+
+### Design decisions
+
+1. **Orchestration-only is enforced, not requested.** Section 7 of the suite parses the module
+   with `ast` and fails if it imports `httpx`, `requests`, `bs4`, `urllib`, `aiohttp`,
+   `selenium` — or even `re`. A comment saying "no scraping here" is worth nothing the first
+   time someone needs "just one regex"; a failing test is worth something. The same section
+   asserts the module *does* call `discover_many`, `extract_many`, `normalize_lead`,
+   `deduplicate` and `collect_normalized`, so the stages are delegated rather than reimplemented.
+2. **Both normalisation passes run, and neither is redundant.**
+   `ContactNormalizationService.normalize_lead` canonicalises *values* (E.164 phones,
+   lowercased emails, bare handles); `NormalizedLead.normalize()` enforces the *record's*
+   shape (column length caps, coordinate ranges, ordered phone de-duplication). Deduplication
+   derives its comparison keys from both, so both must precede stage 5.
+3. **Deduplication returns a plan; this service applies it.** `LeadDeduplicationService`
+   performs no writes by design, so the transaction shape stays with the caller. This
+   orchestrator writes per record — one unwritable row costs one row, not the run.
+4. **A vanished merge target is a failure, not a re-create.** If the lead a record matched is
+   deleted between planning and writing, the record is counted in `failed` with a reason.
+   Re-creating it would resurrect a lead someone deliberately removed.
+5. **`found` is the denominator, counted before any filtering.** Invalid records (no business
+   name, no phone) are counted in `failed` rather than quietly dropped, which is what makes
+   the reconciliation identity meaningful — a record cannot disappear between two stages
+   without the totals disagreeing.
+6. **Records are filtered for validity *before* deduplication**, so the stage does not spend a
+   candidate query on a record that could never be stored.
+7. **The provider is injected as an object, not resolved from the registry mid-run**, for the
+   same reason `LeadImportService.run_import` accepts a `provider` argument: a service that
+   reaches into a global registry during a run cannot be tested without mutating that global.
+
+### Testing
+
+`tests/test_lead_discovery.py` — 8 sections, run with `python tests/test_lead_discovery.py`.
+
+It is an **integration** suite: the database is real, and four of the six stages are real
+(normalization, deduplication, persistence, activity logging). Only the three
+network-touching collaborators are stubbed, each implementing its port — `StubProvider`
+(a real `LeadProvider`), `StubDiscovery`, `StubExtractor`. Those three have their own
+dedicated suites already; what is under test here is the orchestration.
+
+Covered: DI and defaults · stage order and hand-off (proven by recording harnesses, including
+that extraction receives the website discovery found) · the five-key contract and its
+reconciliation against rows actually in the database · enrichment reaching the saved `Lead` ·
+merge / duplicate / within-batch-duplicate · invalid records, a failing write, a source fault,
+and a refused request · the structural orchestration-only assertions · empty results and the
+two stage toggles.
+
+All rows are hard-deleted in a `finally` block (repository writes commit immediately, so a
+session rollback would not undo them), matched by a per-run marker so a mid-suite failure
+still cleans up. Neighbouring suites re-run green: `test_lead_deduplication`,
+`test_website_discovery`, `test_contact_extractor`, `test_contact_normalization`,
+`test_overpass_import`.
+
+### Known gaps / follow-ups
+
+1. **No endpoint yet.** The service is callable but unexposed; a `POST /leads/discover` taking
+   a city belongs in a follow-up together with an RBAC permission and a decision about whether
+   a long run should be backgrounded. A city-wide run issues one search and one site visit per
+   lead found, so it is a slow request, not a snappy one.
+2. **No `ImportJob` row.** `LeadImportService` records every run as an auditable job with a log
+   array; this pipeline returns its summary in-process and leaves no trace beyond the leads and
+   their activities. The two should converge — most naturally by having this service create an
+   `ImportJob` too, rather than by adding a second audit shape.
+3. **Overlap with `LeadImportService`.** `_create_lead`, `_resolve_source` and `_build_remarks`
+   are close relatives of that service's versions. Left duplicated rather than hoisted, because
+   the two differ where it matters (remarks wording, merge source) and a premature shared base
+   class would couple two use cases that are still moving. Worth extracting once the endpoint
+   above fixes their shapes.
+4. **Single city per run.** Multi-city is a loop over `run()` by the caller; batching the
+   geocode step across cities would be faster but is not needed until there is a scheduler.
+5. **`radius_km` is passed through untouched** in `options`. Fine for Overpass; a second
+   provider with a different geographic parameter would want a typed request object rather
+   than a free-form dict.
+
+---
+
+# Phase — Production-Readiness of the Lead Discovery Workflow
+
+## Objective
+
+Make the end-to-end path — **city search → real businesses → contact information → clean
+leads → CRM** — reliable, and make what it collected visible to the operator who has to act
+on it. Not a rewrite: the six stages already existed and are largely untouched. This phase
+audited the pipeline for silent data loss, fixed what it found, and surfaced the result.
+
+## The audit, and what it found
+
+Traced `POST /api/v1/leads/discover` → Overpass → website discovery → contact extraction →
+normalization → deduplication → persistence. Stage order was correct, the counters
+reconciled, and the two enrichment toggles were already wired end to end. Four real defects
+came out of it:
+
+1. **YouTube was collected and then discarded.** `ContactExtractorService` extracts YouTube
+   URLs from business websites and carries them through `NormalizedLead.youtube`, but `Lead`
+   had no `youtube` column, neither `_create_lead` mapped it nor `MERGEABLE_FIELDS` merged
+   it. Every YouTube link the pipeline found died at the persistence boundary. This is the
+   one genuine missing persisted field, so the `Lead` model gained a column and a migration.
+2. **A plain phone number was treated as a WhatsApp number.** `whatsAppHref` fell back to
+   `lead.phone` when `whatsapp` was empty, producing a `wa.me` link for numbers nothing had
+   confirmed were on WhatsApp. Removed: the link is now built from the `whatsapp` column
+   alone.
+3. **The results table could not show what was collected.** `DiscoveryRecord` carried only
+   name/phone/email/city/website, so WhatsApp, Instagram, Facebook and source were invisible
+   to the operator even though they had been stored.
+4. **No enrichment statistics existed.** The response reported the five counters but nothing
+   about how much contact information a run actually landed.
+
+Everything else the audit checked — website URLs not being overwritten, duplicates not
+creating rows, per-record failure isolation — was already correct and was left alone.
+
+## What changed
+
+**Persistence.** `Lead.youtube` (`String(500)`, nullable) plus migration `5fa580580353`.
+Mapped in `LeadDiscoveryService._create_lead` and `LeadImportService._create_lead` (the CSV
+path had the same gap), added to `MERGEABLE_FIELDS`, and exposed on `LeadBase`/`LeadUpdate`
+with the same URL validation `website` and `facebook` use.
+
+**Enrichment statistics.** New `EnrichmentStats` on `DiscoverySummary`, computed once after
+persistence by `compute_enrichment()` and projected as the `enrichment` key. The contact
+counters are measured **over the leads actually written**, not over what a stage claimed to
+find — a phone extracted but then dropped because the lead already had one is not a phone
+this run delivered. No schema change: nothing here is persisted.
+
+**Contact quality and WhatsApp readiness.** Both are derived properties on
+`DiscoveredLeadRecord`, never columns. Quality is HIGH (number + second channel) / MEDIUM
+(number only) / LOW (web or social only) / NONE. Readiness is true only when the `whatsapp`
+column holds a number.
+
+**UI.** The results table gained WhatsApp, Instagram, Facebook, Source and Quality columns,
+`tel:` and `wa.me` links, truncation with the full value on hover, and
+`rel="noopener noreferrer"` on every external link. Lead Details renders Facebook and
+YouTube; the pipeline card badges WhatsApp-ready leads. Cache invalidation on
+`leadKeys.all` after a run already existed and was verified.
+
+## Testing
+
+`tests/test_lead_discovery.py` gained section 9: every channel persists; an ordinary phone is
+never read as WhatsApp; statistics are counted over what was written; a populated field
+survives a weaker source while empty ones are filled; a failed enrichment saves the lead
+unenriched. That last one drives the **real** `ContactExtractorService` against an
+RFC 2606 `.invalid` host rather than a raising stub — the guarantee under test is the
+extractor's own "never raises" contract, and a stub that throws would only prove the stub
+throws. No test makes a real external request.
+
+`tests/test_lead_discovery_endpoint.py` pins the response shape key-for-key; both pins were
+widened deliberately for `enrichment` and the new record fields.
+
+## Known gaps / follow-ups
+
+1. **ESLint is not installed**, so `npm run lint` cannot run. Not installed here on
+   instruction — the `package.json` script is unchanged and will work once a version is
+   chosen deliberately.
+2. **Discovery is still synchronous** and writes no `ImportJob` row, so the progress panel
+   remains an elapsed-time estimate. Unchanged this phase; the polling seam is still in
+   `discoveryHooks.ts`.
+3. **`contact_quality` is computed in two places** — `DiscoveredLeadRecord.contact_quality`
+   and `contactQualityOf` in `utils.ts` — because the pipeline card scores leads the backend
+   never sent through discovery. The two are kept deliberately identical.
+4. **WhatsApp readiness depends on sources labelling numbers.** A studio that publishes one
+   number without marking it as WhatsApp is MEDIUM, not WhatsApp-ready, and will be missed by
+   a campaign filter even if the number does work on WhatsApp. Deliberate: the alternative is
+   guessing.

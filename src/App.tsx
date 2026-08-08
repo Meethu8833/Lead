@@ -11,7 +11,10 @@ import Login from './pages/auth/Login';
 import ForgotPassword from './pages/auth/ForgotPassword';
 import ResetPassword from './pages/auth/ResetPassword';
 import ChangePassword from './pages/auth/ChangePassword';
-import Dashboard from './pages/dashboard/Dashboard';
+import LeadDashboardPage from './features/leads/pages/LeadDashboardPage';
+import LeadDetailsPage from './features/leads/pages/LeadDetailsPage';
+import LeadPipelinePage from './features/leads/pages/LeadPipelinePage';
+import ImportLeadsPage from './features/leads/pages/ImportLeadsPage';
 import Forbidden from './pages/errors/Forbidden';
 import Unauthorized from './pages/errors/Unauthorized';
 import NotFound from './pages/errors/NotFound';
@@ -69,12 +72,12 @@ export default function App() {
           </ProtectedRoute>
         }
       >
-        {/* Dashboard index (requires dashboard:view) */}
+        {/* Lead CRM dashboard — the default landing page for the CRM (requires dashboard:view) */}
         <Route
           index
           element={
             <ProtectedRoute requiredPermission="dashboard:view">
-              <Dashboard />
+              <LeadDashboardPage />
             </ProtectedRoute>
           }
         />
@@ -119,6 +122,97 @@ export default function App() {
           element={
             <ProtectedRoute requiredPermission="orders:update">
               <EditOrderPage />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* ==========================================
+            LEAD CRM MODULE
+            The dashboard links into these routes. Only the dashboard itself is built in
+            this phase; the destinations below are placeholders so that every link on it
+            resolves instead of falling through to the 404 page.
+            ========================================== */}
+        {/* The Lead Pipeline (Kanban) board. `leads:view` gates the page; the drag/drop
+            and quick actions inside it are separately gated on the permissions their own
+            endpoints enforce (leads:update, followups:create, whatsapp:create). */}
+        <Route
+          path="leads"
+          element={
+            <ProtectedRoute requiredPermission="leads:view">
+              <LeadPipelinePage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          Guarded on `leads:import`, not `leads:create`: bulk-importing hundreds of leads is
+          a materially different capability from adding one by hand, and it is the
+          permission the backend's import endpoints actually enforce.
+        */}
+        <Route
+          path="leads/import"
+          element={
+            <ProtectedRoute requiredPermission="leads:import">
+              <ImportLeadsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="leads/:id"
+          element={
+            <ProtectedRoute requiredPermission="leads:view">
+              <LeadDetailsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="followups"
+          element={
+            <ProtectedRoute requiredPermission="followups:view">
+              <div className="p-6">
+                <h1 className="text-3xl font-extrabold tracking-tight">Follow-ups</h1>
+                <p className="mt-2 text-muted-foreground">
+                  The full follow-up worklist. Coming in the next phase.
+                </p>
+              </div>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="campaigns"
+          element={
+            <ProtectedRoute requiredPermission="whatsapp:view">
+              <div className="p-6">
+                <h1 className="text-3xl font-extrabold tracking-tight">WhatsApp Campaigns</h1>
+                <p className="mt-2 text-muted-foreground">
+                  Campaign list and templates. Coming in the next phase.
+                </p>
+              </div>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="campaigns/new"
+          element={
+            <ProtectedRoute requiredPermission="whatsapp:create">
+              <div className="p-6">
+                <h1 className="text-3xl font-extrabold tracking-tight">Create Campaign</h1>
+                <p className="mt-2 text-muted-foreground">
+                  Campaign composer. Coming in the next phase.
+                </p>
+              </div>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="campaigns/:id"
+          element={
+            <ProtectedRoute requiredPermission="whatsapp:view">
+              <div className="p-6">
+                <h1 className="text-3xl font-extrabold tracking-tight">Campaign Details</h1>
+                <p className="mt-2 text-muted-foreground">
+                  Campaign recipients and delivery stats. Coming in the next phase.
+                </p>
+              </div>
             </ProtectedRoute>
           }
         />

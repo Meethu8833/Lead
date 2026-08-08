@@ -29,6 +29,7 @@ from app.api.v1.endpoints import (
     auth,
     employees,
     whatsapp,
+    followups,
 )
 
 api_router = APIRouter()
@@ -161,6 +162,16 @@ api_router.include_router(
     whatsapp.router,
     prefix="/whatsapp",
     tags=["whatsapp-campaigns"]
+)
+
+# The followups router owns its own literal sub-paths (`/today`, `/upcoming`, `/overdue`,
+# `/statistics`), which it declares ahead of `/{id}` internally — see the module docstring
+# in endpoints/followups.py. Nothing else claims the `/followups` prefix, so ordering
+# relative to the other routers here does not matter.
+api_router.include_router(
+    followups.router,
+    prefix="/followups",
+    tags=["followups"]
 )
 
 

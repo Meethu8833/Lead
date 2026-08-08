@@ -8,11 +8,23 @@ business logic — deduplication, enrichment and job lifecycle all live in the s
 
 Routing note
 ------------
-This router is mounted at the root prefix and owns the literal paths `/leads/import*` and
-`/leads/imports*`. It MUST be registered before the `leads` router in
+This router is mounted at the root prefix and owns the literal paths `/leads/import*`,
+`/leads/imports*` and `/leads/discover`. It MUST be registered before the `leads` router in
 `app/api/v1/router.py`, otherwise `GET /leads/imports` is swallowed by `GET /leads/{id}`
 and fails as an invalid UUID. This is the same ordering constraint already documented for
-`lead_activities.py`.
+`lead_activities.py`. `/leads/discover` is a POST and `/leads/{id}` is not, so that one
+route would survive the wrong order by method alone — it lives here regardless, because
+splitting the lead-collection path space across two routers is how the ordering constraint
+gets forgotten.
+
+Import versus discover
+----------------------
+`POST /leads/import` names a *provider* and hands it a query; the caller chooses the source
+and gets back an `ImportJob` row it can audit later. `POST /leads/discover` names a *city*
+and runs the fixed enrichment pipeline `LeadDiscoveryService` owns (collect → find website →
+read contacts → normalise → dedup → save), returning five counters and writing no job row.
+They share the `leads:import` permission because they have the same blast radius: both write
+leads in bulk from an outside source.
 
 Permissions
 -----------
@@ -23,16 +35,26 @@ kept `whatsapp:*` separate from `leads:*`. Read routes require `leads:view`, sin
 job is a read over the lead pipeline's provenance.
 """
 
+import logging
 import uuid
 from datetime import datetime
+from typing import Any
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_current_employee, get_lead_import_service, RequirePermission
-from app.core.exceptions import BadRequestException
+from app.api.deps import (
+    get_db,
+    get_current_employee,
+    get_lead_discovery_service,
+    get_lead_import_service,
+    RequirePermission,
+)
+from app.core.exceptions import AppException, BadRequestException
 from app.models.employee import Employee
 from app.models.import_job import ImportJobStatus
 from app.schemas.import_job import (
+    DiscoveryRunRequest,
+    DiscoveryRunResponse,
     ImportJobDetailResponse,
     ImportJobListResponse,
     ImportJobResponse,
@@ -40,8 +62,12 @@ from app.schemas.import_job import (
     ImportStatisticsResponse,
     ProviderListResponse,
 )
+from app.services.lead_discovery import LeadDiscoveryService
 from app.services.lead_import import LeadImportService
 from app.services.lead_providers import MAX_COLLECTION_LIMIT, list_providers
+from app.services.lead_providers.base import ProviderCollectionError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -279,3 +305,107 @@ async def retry_import_job(
     the new job.
     """
     return await service.retry_job(db=db, id=id, created_by=current_employee.id)
+
+
+@router.post(
+    "/leads/discover",
+    response_model=DiscoveryRunResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Discover and import leads for a city",
+    responses={
+        400: {
+            "description": (
+                "The request cannot be serviced: unknown city, unusable radius, or a "
+                "provider that is declared but not implemented."
+            )
+        },
+        403: {"description": "Caller lacks the `leads:import` permission."},
+        422: {"description": "Request body failed validation (e.g. `radius_km` <= 0)."},
+        502: {
+            "description": (
+                "The upstream discovery source could not be reached or returned an "
+                "unusable response. Nothing was collected and nothing was written."
+            )
+        },
+    },
+    description=(
+        "Runs the full lead discovery pipeline for one city and returns what it did.\n\n"
+        "The pipeline collects businesses from OpenStreetMap around the geocoded city, "
+        "finds the official website of those without one, reads the contacts those sites "
+        "publish, canonicalises phones and emails, deduplicates the result against existing "
+        "leads, and saves what is new.\n\n"
+        "The five returned counters always reconcile: "
+        "`imported + merged + duplicates + failed == found`. A record that matches an "
+        "existing lead and fills in at least one empty field counts as `merged`, not "
+        "`imported`; one that matches and adds nothing counts as `duplicates`. Records with "
+        "no business name or no phone number count as `failed` — they are unusable as leads "
+        "rather than lost.\n\n"
+        "The run is synchronous and network-bound: it geocodes the city, queries Overpass, "
+        "and may fetch one page per discovered website, so a large `limit` with both "
+        "enrichment stages on takes appreciable time. Set `discover_websites` or "
+        "`extract_contacts` to false to skip those stages."
+    ),
+    dependencies=[Depends(RequirePermission("leads:import"))],
+)
+async def discover_leads(
+    schema: DiscoveryRunRequest,
+    db: AsyncSession = Depends(get_db),
+    service: LeadDiscoveryService = Depends(get_lead_discovery_service),
+    current_employee: Employee = Depends(get_current_employee),
+) -> DiscoveryRunResponse:
+    """
+    POST /leads/discover Endpoint Flow:
+    Client JSON -> validated request -> LeadDiscoveryService.run() executes the six-stage
+    pipeline against a real session -> the summary's five counters are returned.
+
+    `category` and `radius_km` travel in `options`, which is the channel the provider
+    contract defines for per-adapter extras; the Overpass adapter reads both from there and
+    is the authority on defaulting and clamping the radius. `radius_km` is omitted from
+    `options` entirely when the caller did not supply one, so the adapter applies its own
+    default rather than receiving a None it would have to interpret.
+
+    The response carries the five counters and, alongside them, the records behind three of
+    them: `imported_records`, `merged_records` and `failed_records`. Those come from
+    `summary.to_response_dict()`, which the service builds at its write sites — this
+    function does no projection of its own, and `merged_records` in particular could not be
+    rebuilt here, since the enriched-field list only exists during planning.
+
+    `ProviderCollectionError` is translated here rather than left to propagate. It is not a
+    caller error and not a bug — it means the donated public endpoint was unreachable or
+    answered with something unusable — so it maps to 502 with the source named. Letting it
+    reach the generic handler would report a source outage as an internal server error and
+    send an operator looking in the wrong place. `BadRequestException` from the provider's
+    own validation is already an `AppException` and is left to the global handler, which
+    renders it as the 400 documented above.
+    """
+    options: dict[str, Any] = {}
+    if schema.category:
+        options["category"] = schema.category
+    if schema.radius_km is not None:
+        options["radius_km"] = schema.radius_km
+
+    logger.info(
+        "Lead discovery requested for city=%r category=%r radius_km=%s by employee %s",
+        schema.city, schema.category, schema.radius_km, current_employee.id,
+    )
+
+    try:
+        summary = await service.run(
+            db=db,
+            city=schema.city,
+            query=schema.category,
+            limit=schema.limit,
+            state=schema.state,
+            options=options,
+            discover_websites=schema.discover_websites,
+            extract_contacts=schema.extract_contacts,
+        )
+    except ProviderCollectionError as exc:
+        logger.warning("Lead discovery for %r failed at the source: %s", schema.city, exc)
+        raise AppException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Lead discovery source unavailable: {exc}",
+            error_code="DISCOVERY_SOURCE_UNAVAILABLE",
+        ) from exc
+
+    return DiscoveryRunResponse(**summary.to_response_dict())

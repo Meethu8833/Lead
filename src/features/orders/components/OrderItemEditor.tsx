@@ -111,6 +111,7 @@ export const OrderItemEditor = ({ isOpen, item, products, onClose, onSave, isSub
             name="product_id"
             render={({ field }) => (
               <ProductSelector
+                products={products}
                 value={field.value}
                 onSelect={(product) => field.onChange(product.id)}
                 disabled={locked || isSubmitting}

@@ -94,6 +94,7 @@ export const AddItemDialog = ({ isOpen, onClose, onSubmit, products, isSubmittin
             name="product_id"
             render={({ field }) => (
               <ProductSelector
+                products={products}
                 value={field.value}
                 onSelect={(product) => field.onChange(product.id)}
                 error={errors.product_id?.message}

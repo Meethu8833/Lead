@@ -225,10 +225,18 @@ class NormalizedLead:
     business_name: str | None = None
     owner_name: str | None = None
     phone_numbers: list[str] = field(default_factory=list)
+    #: Numbers *known* to be WhatsApp-reachable, because the site published a click-to-chat
+    #: link for them. Kept separate from `phone_numbers` rather than folded in: a number in a
+    #: footer might or might not be on WhatsApp, and `LeadImportService` fills the CRM's
+    #: `whatsapp` column from here in preference to guessing at `phone_numbers[1]`.
+    whatsapp_numbers: list[str] = field(default_factory=list)
     emails: list[str] = field(default_factory=list)
     website: str | None = None
     instagram: str | None = None
     facebook: str | None = None
+    #: Publicly linked YouTube channel. No CRM column exists for it today, so it rides on the
+    #: DTO for the operator's benefit and is preserved through `normalize()`.
+    youtube: str | None = None
     address: str | None = None
     city: str | None = None
     district: str | None = None
@@ -271,6 +279,21 @@ class NormalizedLead:
             seen_phones.add(key)
             phones.append(cleaned)
 
+        # WhatsApp numbers are de-duplicated against each other but deliberately NOT against
+        # `phone_numbers`: the same number legitimately appears in both lists, once as "a
+        # number this business publishes" and once as "a number reachable on WhatsApp".
+        seen_whatsapp: set[str] = set()
+        whatsapp: list[str] = []
+        for candidate in self.whatsapp_numbers:
+            cleaned = _clean_text(candidate, limit=50)
+            if not cleaned:
+                continue
+            key = normalize_phone(cleaned)
+            if not key or key in seen_whatsapp:
+                continue
+            seen_whatsapp.add(key)
+            whatsapp.append(cleaned)
+
         seen_emails: set[str] = set()
         emails: list[str] = []
         for candidate in self.emails:
@@ -302,10 +325,12 @@ class NormalizedLead:
             business_name=_clean_text(self.business_name, limit=255),
             owner_name=_clean_text(self.owner_name, limit=255),
             phone_numbers=phones,
+            whatsapp_numbers=whatsapp,
             emails=emails,
             website=normalize_url(self.website),
             instagram=normalize_instagram(self.instagram),
             facebook=normalize_url(self.facebook),
+            youtube=normalize_url(self.youtube),
             address=_clean_text(self.address, limit=500),
             city=_clean_text(self.city, limit=100),
             district=_clean_text(self.district, limit=100),
@@ -350,11 +375,15 @@ class NormalizedLead:
     @property
     def secondary_phone(self) -> str | None:
         """
-        The number promoted to the CRM's `whatsapp` column when the provider offered more
-        than one. A second listed number is far more often a mobile than a fax, and the
-        WhatsApp column is nullable and advisory, so this is a useful default rather than a
-        risky guess.
+        The number promoted to the CRM's `whatsapp` column.
+
+        A number we *know* is WhatsApp-reachable — because the site published a click-to-chat
+        link for it — always wins. Only when there is none do we fall back to the old
+        heuristic of "the second listed number", which is far more often a mobile than a fax,
+        and which the nullable, advisory `whatsapp` column tolerates being wrong about.
         """
+        if self.whatsapp_numbers:
+            return self.whatsapp_numbers[0]
         return self.phone_numbers[1] if len(self.phone_numbers) > 1 else None
 
     @property

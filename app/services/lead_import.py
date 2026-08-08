@@ -638,6 +638,7 @@ class LeadImportService:
             email=record.primary_email,
             instagram=record.instagram,
             facebook=record.facebook,
+            youtube=record.youtube,
             website=record.website,
             address=record.address,
             city=record.city,

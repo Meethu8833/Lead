@@ -8,6 +8,7 @@ into rich objects (or models) that can be consumed by the business logic (Servic
 By isolating SQL statements here, we keep services free of data access technologies.
 """
 
+import re
 import uuid
 from typing import Sequence
 from datetime import datetime, timezone
@@ -248,6 +249,81 @@ class LeadRepository:
             query = query.where(Lead.is_deleted == False)
 
         result = await db.execute(query.order_by(Lead.created_at.desc()))
+        return result.scalars().all()
+
+    async def find_proximity_candidates(
+        self,
+        db: AsyncSession,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        lat_delta: float | None = None,
+        lon_delta: float | None = None,
+        city: str | None = None,
+        limit: int = 200,
+        include_deleted: bool | None = None,
+    ) -> Sequence[Lead]:
+        """
+        Fetches leads that may satisfy the two duplicate rules that are not exact equality:
+        coordinate proximity and business-name similarity.
+
+        This is a *prefilter*, not a decision. Neither rule can be expressed as an indexed
+        lookup — proximity is a distance and name similarity is fuzzy — so the actual
+        comparison happens in `LeadDeduplicationService`. This method's only job is to bound
+        how many rows that comparison has to consider, which is what stops each imported
+        record from becoming a table scan.
+
+        Two predicates, OR'd:
+        - a latitude/longitude bounding box, sized by the caller to be slightly larger than
+          its distance tolerance so no point the haversine check would accept is excluded
+          here (a box is a superset of the circle inside it);
+        - an exact city match, since the name-similarity rule is scoped to one city.
+
+        `limit` caps the result because a common city name would otherwise return the entire
+        table; leads are ordered most-recently-created first so the cap keeps the rows most
+        likely to be relevant, matching `find_duplicate_candidates`' ordering.
+
+        Returns an empty sequence when no usable filter was supplied, rather than every
+        lead — an unfiltered call here would be a silent full scan.
+        """
+        inc = include_deleted if include_deleted is not None else self.include_deleted
+
+        predicates = []
+
+        if (
+            latitude is not None
+            and longitude is not None
+            and lat_delta is not None
+            and lon_delta is not None
+        ):
+            predicates.append(
+                and_(
+                    Lead.latitude.is_not(None),
+                    Lead.longitude.is_not(None),
+                    Lead.latitude.between(latitude - lat_delta, latitude + lat_delta),
+                    Lead.longitude.between(longitude - lon_delta, longitude + lon_delta),
+                )
+            )
+
+        city_key = (city or "").strip()
+        if city_key:
+            # Compared on the same normalisation the service uses for its city scope:
+            # lowercased with non-alphanumerics removed, so "New Delhi" and "new-delhi"
+            # agree.
+            city_expr = func.regexp_replace(
+                func.lower(func.coalesce(Lead.city, "")), r"[^a-z0-9]+", "", "g"
+            )
+            normalized_city = re.sub(r"[^a-z0-9]+", "", city_key.lower())
+            if normalized_city:
+                predicates.append(city_expr == normalized_city)
+
+        if not predicates:
+            return []
+
+        query = select(Lead).where(or_(*predicates))
+        if not inc:
+            query = query.where(Lead.is_deleted == False)
+
+        result = await db.execute(query.order_by(Lead.created_at.desc()).limit(limit))
         return result.scalars().all()
 
     async def update(self, db: AsyncSession, db_obj: Lead, update_data: dict) -> Lead:

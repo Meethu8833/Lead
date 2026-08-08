@@ -101,8 +101,8 @@ REPLY_TYPE_TO_LEAD_STATUS: dict[str, LeadStatus] = {
 # Lead statuses that a reply must never overwrite. A lead that has already converted, or
 # been explicitly written off, is past the point where an inbound message should rewrite
 # its position in the pipeline — that is a human decision. Without this guard a stray
-# "thanks!" after conversion would demote a CUSTOMER back to NEGOTIATION.
-_TERMINAL_LEAD_STATUSES: set[LeadStatus] = {LeadStatus.CUSTOMER}
+# "thanks!" after conversion would demote a CONVERTED lead back to NEGOTIATION.
+_TERMINAL_LEAD_STATUSES: set[LeadStatus] = {LeadStatus.CONVERTED}
 
 
 class WhatsAppTemplateService:
@@ -1021,12 +1021,20 @@ class CampaignReplyService:
         lead_repository: LeadRepository | None = None,
         activity_service: LeadActivityService | None = None,
         campaign_service: WhatsAppCampaignService | None = None,
+        follow_up_automation: "FollowUpAutomationService | None" = None,
     ) -> None:
         self.recipient_repository = recipient_repository or CampaignRecipientRepository()
         self.campaign_repository = campaign_repository or WhatsAppCampaignRepository()
         self.lead_repository = lead_repository or LeadRepository()
         self.activity_service = activity_service or LeadActivityService()
         self.campaign_service = campaign_service or WhatsAppCampaignService()
+        # Imported lazily inside __init__ rather than at module scope: FollowUpAutomationService
+        # is a downstream consumer of this module's reply vocabulary, and a top-level import
+        # here would close an import cycle.
+        if follow_up_automation is None:
+            from app.services.follow_up import FollowUpAutomationService
+            follow_up_automation = FollowUpAutomationService()
+        self.follow_up_automation = follow_up_automation
 
     @staticmethod
     def resolve_lead_status(
@@ -1183,6 +1191,27 @@ class CampaignReplyService:
         if campaign:
             await self.campaign_service._recompute_counters(db, campaign, commit=False)
 
+        # 6. The follow-up task this reply calls for, in the same transaction so a recorded
+        #    reply and its task can never disagree. This call cannot raise: the automation
+        #    service swallows and logs its own failures precisely so that a secondary
+        #    convenience feature can never cost us an un-replayable provider webhook. See
+        #    FollowUpAutomationService._safe_create.
+        follow_up_task = await self.follow_up_automation.on_campaign_reply(
+            db, lead=lead, reply_type=reply_type, commit=False
+        )
+
+        # A reply that also pushed the lead into NEGOTIATION triggers the meeting task. The
+        # status-change trigger is evaluated here rather than being left to LeadService,
+        # because this path writes `lead.status` directly on the ORM object and never goes
+        # through `LeadService.update_lead` — so without this call, the single most valuable
+        # automated task would silently not fire for the most common way a lead reaches
+        # negotiation. De-duplication inside the automation keeps this safe alongside the
+        # LeadService hook.
+        if new_status is not None:
+            await self.follow_up_automation.on_lead_status_changed(
+                db, lead=lead, old_status=old_status, new_status=new_status, commit=False
+            )
+
         await db.commit()
         await db.refresh(recipient)
         await db.refresh(lead)
@@ -1199,4 +1228,175 @@ class CampaignReplyService:
             "lead_status": lead.status,
             "lead_status_changed": new_status is not None,
             "activity_id": activity.id if activity else None,
+            "follow_up_task_id": follow_up_task.id if follow_up_task else None,
         }
+
+
+class MetaWebhookService:
+    """
+    Service layer for inbound Meta Cloud API webhooks.
+
+    This class is a *router*, not a second implementation. Its entire job is to take the
+    already-parsed events a provider adapter produced and feed each one into the existing
+    pipeline — `WhatsAppCampaignService.apply_delivery_status` for a status update,
+    `CampaignReplyService.record_reply` for a reply. Every rule that matters (monotonic
+    status transitions, the reply → lead-status mapping, timeline entries, follow-up
+    automation, counter recomputation) already lives in those two services and is reached
+    unchanged, which is what the specification's "no duplicate business logic" requirement
+    means in practice.
+
+    It sits in the service layer rather than in the endpoint because it makes a genuine
+    business decision — see `_classify_reply` — and because the endpoint must stay a thin
+    controller.
+
+    Why nothing here raises
+    -----------------------
+    Meta retries a webhook it did not receive a 2xx for, with escalating backoff, and after
+    enough failures it disables the subscription entirely. So a payload containing one
+    unmatchable event must not fail the whole delivery: an event whose message id matches no
+    recipient (a message sent from the same number outside this CRM, or a campaign whose rows
+    were purged) is counted as `unmatched` and skipped. The endpoint then returns 200 with a
+    summary, and the operator can see in the response and the logs exactly what was and was
+    not applied.
+    """
+
+    def __init__(
+        self,
+        campaign_service: WhatsAppCampaignService | None = None,
+        reply_service: CampaignReplyService | None = None,
+    ) -> None:
+        self.campaign_service = campaign_service or WhatsAppCampaignService()
+        self.reply_service = reply_service or CampaignReplyService()
+
+    #: Keyword rules used to classify an inbound reply's intent when the provider gives us
+    #: no classification of its own. Ordered most-specific first: "not interested" must be
+    #: tested before "interested", or every rejection would be read as enthusiasm.
+    #:
+    #: This is deliberately crude. It exists because Meta delivers raw text and the existing
+    #: reply pipeline expects an optional `reply_type`, and a rule that only fires on an
+    #: unambiguous phrase is better than no automation at all. Anything it cannot classify
+    #: returns None, which leaves the lead's status untouched for a human to triage — the
+    #: safe default, since a misclassification silently writes off a live lead.
+    REPLY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+        ("not_interested", (
+            "not interested", "no thanks", "no thank you", "stop", "unsubscribe",
+            "don't contact", "dont contact", "do not contact", "remove me", "not required",
+            "no need",
+        )),
+        ("interested", (
+            "interested", "yes", "sure", "please share", "send details", "i want",
+            "book", "how much", "price", "cost", "quote",
+        )),
+        ("need_details", (
+            "more info", "more information", "details", "tell me more", "what is",
+            "explain", "clarify",
+        )),
+    ]
+
+    @classmethod
+    def _classify_reply(cls, text: str | None) -> str | None:
+        """
+        Derives a `reply_type` from a lead's free-text answer, or None when unsure.
+
+        Returns None rather than guessing for anything that matches no rule, because the
+        downstream mapping moves a lead to LOST on `not_interested` — a wrong guess there
+        writes off a real lead, and no CRM user will ever go looking for the message that
+        caused it.
+        """
+        if not text:
+            return None
+        haystack = text.strip().lower()
+        if not haystack:
+            return None
+        for reply_type, keywords in cls.REPLY_KEYWORDS:
+            if any(keyword in haystack for keyword in keywords):
+                return reply_type
+        return None
+
+    async def process(
+        self,
+        db: AsyncSession,
+        statuses: Sequence[Any],
+        replies: Sequence[Any],
+    ) -> dict[str, Any]:
+        """
+        Applies every parsed status update and reply from one webhook delivery.
+
+        Args:
+            statuses: `InboundStatusEvent` objects from the adapter's parser.
+            replies: `InboundReplyEvent` objects from the adapter's parser.
+
+        Returns a summary of what was applied, skipped and unmatched, which the endpoint
+        returns as its 200 body — so a webhook that did nothing says so explicitly rather
+        than looking indistinguishable from one that worked.
+
+        Each event is applied in its own transaction, by the service that owns it. That is
+        the right boundary: one payload may carry a status update for campaign A and a reply
+        for campaign B, and a failure applying one must not roll back the other.
+        """
+        applied_statuses = 0
+        applied_replies = 0
+        unmatched: list[str] = []
+        errors: list[str] = []
+
+        for event in statuses:
+            try:
+                mapped = MessageStatus[event.status]
+            except KeyError:
+                errors.append(f"Unknown status '{event.status}' for {event.provider_message_id}.")
+                continue
+
+            try:
+                await self.campaign_service.apply_delivery_status(
+                    db,
+                    provider_message_id=event.provider_message_id,
+                    status=mapped,
+                    error_message=event.error_message,
+                    occurred_at=event.occurred_at,
+                )
+                applied_statuses += 1
+            except NotFoundException:
+                # Expected and benign: a status for a message this CRM did not send.
+                unmatched.append(event.provider_message_id)
+            except Exception as exc:  # noqa: BLE001 - one bad event must not fail the delivery
+                logger.exception(
+                    "Failed to apply a Meta delivery status for message %s",
+                    event.provider_message_id,
+                )
+                errors.append(f"{event.provider_message_id}: {exc}")
+
+        for event in replies:
+            try:
+                await self.reply_service.record_reply(
+                    db,
+                    reply_text=event.text,
+                    # Prefer the quoted outbound message when the lead used WhatsApp's
+                    # reply-to feature: it pins the reply to an exact campaign message.
+                    # Otherwise fall back to the sender's number, which the existing
+                    # matcher resolves against that number's most recent dispatch.
+                    provider_message_id=event.context_message_id,
+                    phone=None if event.context_message_id else event.from_phone,
+                    reply_type=self._classify_reply(event.text),
+                    replied_at=event.occurred_at,
+                )
+                applied_replies += 1
+            except NotFoundException:
+                # A message from someone who is not in any campaign — a walk-in enquiry to
+                # the business number. Not an error; simply not ours to record here.
+                unmatched.append(event.provider_message_id or event.from_phone)
+            except Exception as exc:  # noqa: BLE001 - see above
+                logger.exception(
+                    "Failed to record a Meta inbound reply from %s", event.from_phone
+                )
+                errors.append(f"{event.from_phone}: {exc}")
+
+        summary = {
+            "statuses_received": len(statuses),
+            "statuses_applied": applied_statuses,
+            "replies_received": len(replies),
+            "replies_applied": applied_replies,
+            "unmatched": unmatched,
+            "errors": errors,
+        }
+        logger.info("Processed a Meta webhook delivery: %s", summary)
+        return summary
